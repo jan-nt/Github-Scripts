@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.2
+// @version      2.3
 // @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
-// @supportURL   https://nidushan.com
+// @supportURL   mailto:jas@nortronic.com
 // @match        https://paymanager.logos.dk/parking*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Parking%20User%20Selector.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Parking%20User%20Selector.user.js
 // @grant        none
 // @run-at       document-idle
+// @noframes
 // ==/UserScript==
 
 (function () {
@@ -33,6 +34,7 @@
     const BUTTON_ID = 'prs_select_user-button';
 
     const STORAGE_KEY = 'pm_selected_prs_user';
+    const STORAGE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
     const UI_ID = 'tm-prs-search-box';
     const INPUT_ID = 'tm-prs-search-input';
@@ -167,7 +169,18 @@
 
     function getSavedSelectedUser() {
         try {
-            return JSON.parse(localStorage.getItem(STORAGE_KEY));
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+
+            if (
+                !saved ||
+                !Number.isFinite(saved.savedAt) ||
+                Date.now() - saved.savedAt > STORAGE_MAX_AGE_MS
+            ) {
+                localStorage.removeItem(STORAGE_KEY);
+                return null;
+            }
+
+            return saved;
         } catch {
             return null;
         }

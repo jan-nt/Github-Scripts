@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         PayManager Column Controller
 // @namespace    https://nidushan.com
-// @version      1.1
+// @version      1.2
 // @description  Enable and disable selected PayManager columns automatically
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
-// @supportURL   https://nidushan.com
+// @supportURL   mailto:jas@nortronic.com
 // @match        https://paymanager.logos.dk/transactions*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Column%20Controller.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Column%20Controller.user.js
 // @grant        none
 // @run-at       document-idle
+// @noframes
 // ==/UserScript==
 
 (function () {

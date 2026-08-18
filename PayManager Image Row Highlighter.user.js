@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         PayManager Image Row Highlighter
 // @namespace    https://nidushan.com
-// @version      1.6
+// @version      1.7
 // @description  Highlights transaction rows containing Event, Camera, and Image details
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
-// @supportURL   https://nidushan.com
+// @supportURL   mailto:jas@nortronic.com
 // @match        https://paymanager.logos.dk/transactions*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Image%20Row%20Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Image%20Row%20Highlighter.user.js
 // @grant        none
 // @run-at       document-idle
+// @noframes
 // ==/UserScript==
 
 (function () {

@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         PassPay Parking Extractor
 // @namespace    https://nidushan.com
-// @version      6.8
+// @version      6.9
 // @description  Extract license plate and all parkings, MUI-styled centered UI, copy plate and screenshot
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
-// @supportURL   https://nidushan.com
+// @supportURL   mailto:jas@nortronic.com
 // @match        https://betaling.passpay.no/*
 // @match        https://betaling.parkpay.no/*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PassPay%20Parking%20Extractor.user.js
@@ -13,6 +13,7 @@
 // @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
 // @grant        none
 // @run-at       document-start
+// @noframes
 // ==/UserScript==
 
 (function () {
@@ -24,6 +25,7 @@
 
     const PAYMANAGER_CHAINID_URL = 'https://paymanager.logos.dk/transactions?chainid=';
     const STORAGE_KEY = 'tm-parking-data-v6-mui-location';
+    const STORAGE_MAX_AGE_MS = 30 * 60 * 1000;
 
     const PARKING_PAGE_PATH = '/parkings';
 
@@ -797,8 +799,14 @@
                 return;
             }
 
+            parsed.savedAt = Date.now();
             latestData = parsed;
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+            } catch {
+                // In-memory data remains available when storage is blocked.
+            }
 
             if (isParkingPage()) {
                 setTimeout(retryInject, 300);
@@ -950,7 +958,18 @@
 
     function getStoredData() {
         try {
-            return JSON.parse(localStorage.getItem(STORAGE_KEY));
+            const data = JSON.parse(localStorage.getItem(STORAGE_KEY));
+
+            if (
+                !data ||
+                !Number.isFinite(data.savedAt) ||
+                Date.now() - data.savedAt > STORAGE_MAX_AGE_MS
+            ) {
+                localStorage.removeItem(STORAGE_KEY);
+                return null;
+            }
+
+            return data;
         } catch {
             return null;
         }

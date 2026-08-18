@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         General Background Session Keeper
 // @namespace    https://nidushan.com
-// @version      3.0
+// @version      3.1
 // @description  Keeps DIBS and Riverty sessions active and resumes login when their login pages appear
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
-// @supportURL   https://nidushan.com
+// @supportURL   mailto:jas@nortronic.com
 // @match        https://portal.dibspayment.eu/*
 // @match        https://horizon.gothiagroup.com/HorizonWeb/*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/General%20Background%20Auto%20Refresh.user.js
