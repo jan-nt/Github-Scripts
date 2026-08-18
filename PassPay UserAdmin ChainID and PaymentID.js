@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin ChainID, PaymentID & Search Helper
 // @namespace    https://nidushan.com
-// @version      1.4
+// @version      1.5
 // @description  Converts ChainID and PaymentID values into clickable links and adds smart search helpers
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
