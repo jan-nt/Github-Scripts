@@ -7,6 +7,9 @@
 // @homepageURL  https://nidushan.com
 // @supportURL   https://nidushan.com
 // @match        https://betaling.passpay.no/administration*
+// @updateURL    
+// @downloadURL  https://github.com/jan-nt/Github-Scripts/raw/refs/heads/main/PassPay%20UserAdmin%20ChainID%20and%20PaymentID.js
+
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
