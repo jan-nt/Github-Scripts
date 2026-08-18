@@ -1,0 +1,842 @@
+// ==UserScript==
+// @name         PayManager Parking User Selector
+// @namespace    https://nidushan.com
+// @version      2.1
+// @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
+// @author       Jan Sinnadurai
+// @homepageURL  https://nidushan.com
+// @supportURL   https://nidushan.com
+// @match        https://paymanager.logos.dk/parking*
+// @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Parking%20User%20Selector.user.js
+// @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Parking%20User%20Selector.user.js
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // =========================
+    // SETTINGS
+    // =========================
+
+    const RESTORE_LAST_SELECTED = true;
+    const RESTORE_DELAY_MS = 1500;
+    const MAX_INIT_ATTEMPTS = 80;
+    const INIT_RETRY_MS = 500;
+
+    // =========================
+    // INTERNAL CONFIG
+    // =========================
+
+    const SCRIPT_NAME = 'PayManager Searchable User Selector';
+
+    const SELECT_ID = 'prs_select_user';
+    const BUTTON_ID = 'prs_select_user-button';
+
+    const STORAGE_KEY = 'pm_selected_prs_user';
+
+    const UI_ID = 'tm-prs-search-box';
+    const INPUT_ID = 'tm-prs-search-input';
+    const RESULTS_ID = 'tm-prs-search-results';
+    const STATUS_ID = 'tm-prs-search-status';
+
+    let initialized = false;
+    let restoring = false;
+    let lastAppliedValue = null;
+
+    function log(message) {
+        console.log(`[${SCRIPT_NAME}] ${message}`);
+    }
+
+    function getSelect() {
+        return document.getElementById(SELECT_ID);
+    }
+
+    function getButton() {
+        return document.getElementById(BUTTON_ID);
+    }
+
+    function getInsertTarget() {
+        return document.getElementById('select_user_menu_content')
+            || document.getElementById('menu_content')
+            || document.getElementById('left_container');
+    }
+
+    function normalize(text) {
+        return String(text || '')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function getOptions() {
+        const select = getSelect();
+
+        if (!select) return [];
+
+        return Array.from(select.options).map(option => ({
+            value: option.value,
+            label: option.textContent.trim()
+        }));
+    }
+
+    function getOptionByValue(value) {
+        return getOptions().find(
+            option => option.value === String(value)
+        );
+    }
+
+    function getOptionByLabel(label) {
+        const wanted = normalize(label);
+
+        return getOptions().find(
+            option => normalize(option.label) === wanted
+        );
+    }
+
+    function setStatus(message, color = '#444') {
+        const status = document.getElementById(STATUS_ID);
+
+        if (!status) return;
+
+        status.textContent = message;
+        status.style.color = color;
+    }
+
+    function updateJqueryMobileButton(label) {
+        const button = getButton();
+
+        if (!button) return;
+
+        const span = button.querySelector('span');
+
+        if (span) {
+            span.textContent = label;
+        }
+    }
+
+    function refreshJqueryMobileSelect(select) {
+        try {
+            if (!window.jQuery) return;
+
+            const $select = window.jQuery(select);
+
+            $select.val(select.value);
+            $select.trigger('change');
+
+            if (typeof $select.selectmenu === 'function') {
+                try {
+                    $select.selectmenu('refresh', true);
+                } catch {
+                    $select.selectmenu('refresh');
+                }
+            }
+        } catch (error) {
+            log(`jQuery Mobile refresh failed: ${error.message}`);
+        }
+    }
+
+    function fireSelectEvents(select) {
+        [
+            new Event('input', { bubbles: true }),
+            new Event('change', { bubbles: true }),
+            new Event('blur', { bubbles: true })
+        ].forEach(event => select.dispatchEvent(event));
+    }
+
+    function saveSelectedUser(value, label) {
+        localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+                value,
+                label,
+                savedAt: Date.now()
+            })
+        );
+    }
+
+    function getSavedSelectedUser() {
+        try {
+            return JSON.parse(localStorage.getItem(STORAGE_KEY));
+        } catch {
+            return null;
+        }
+    }
+
+    function applyUser(value, label, shouldSave = true) {
+        const select = getSelect();
+
+        if (!select) {
+            log('Select element not found.');
+            return false;
+        }
+
+        const option =
+            getOptionByValue(value) ||
+            getOptionByLabel(label);
+
+        if (!option) {
+            setStatus(
+                `Could not find user: ${label || value}`,
+                'red'
+            );
+            return false;
+        }
+
+        if (
+            lastAppliedValue === option.value &&
+            select.value === option.value
+        ) {
+            return true;
+        }
+
+        lastAppliedValue = option.value;
+
+        select.value = option.value;
+
+        updateJqueryMobileButton(option.label);
+        fireSelectEvents(select);
+        refreshJqueryMobileSelect(select);
+
+        const input = document.getElementById(INPUT_ID);
+
+        if (input) {
+            input.value = option.label;
+        }
+
+        if (shouldSave) {
+            saveSelectedUser(
+                option.value,
+                option.label
+            );
+        }
+
+        setStatus(
+            `Selected: ${option.label} (${option.value})`,
+            'green'
+        );
+
+        log(
+            `Applied user: ${option.label} (${option.value})`
+        );
+
+        return true;
+    }
+
+    function restoreLastSelectedUser() {
+        if (!RESTORE_LAST_SELECTED || restoring) {
+            return;
+        }
+
+        const saved = getSavedSelectedUser();
+
+        if (!saved || !saved.value) {
+            return;
+        }
+
+        restoring = true;
+
+        setTimeout(() => {
+            const currentSelect = getSelect();
+
+            if (!currentSelect) {
+                restoring = false;
+                return;
+            }
+
+            const optionExists =
+                getOptionByValue(saved.value);
+
+            if (optionExists) {
+                applyUser(
+                    saved.value,
+                    saved.label,
+                    false
+                );
+            }
+
+            restoring = false;
+
+        }, RESTORE_DELAY_MS);
+    }
+
+    function preventPasswordManager(input) {
+        if (!input) return;
+
+        // Set a completely random, non-credential-sounding name
+        input.name = '_x' + Math.random().toString(36).substring(2, 8);
+
+        // Remove any id attribute that might hint at credentials
+        // (the INPUT_ID constant is 'tm-prs-search-input' which is safe, but enforce anyway)
+        if (/user|pass|login|cred|account/i.test(input.id)) {
+            input.removeAttribute('id');
+        }
+
+        // Force all anti-password-manager attributes
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('data-form-type', 'other');
+        input.setAttribute('data-1p-ignore', 'true');
+        input.setAttribute('data-lpignore', 'true');
+        input.setAttribute('data-bwignore', 'true');
+
+        // Disable browser input heuristics
+        input.setAttribute('inputmode', 'none');
+
+        // The readonly trick: Chrome skips readonly fields when scanning for password fields
+        // We make it readonly, then remove readonly on focus so the user can type
+        if (!input.hasAttribute('data-readonly-fix')) {
+            input.setAttribute('data-readonly-fix', 'true');
+            input.readOnly = true;
+            const enableInput = () => {
+                input.readOnly = false;
+                input.removeEventListener('focus', enableInput);
+            };
+            input.addEventListener('focus', enableInput, { once: true });
+        }
+    }
+
+    function applyPasswordManagerDefense() {
+        const input = document.getElementById(INPUT_ID);
+        if (!input) return;
+
+        preventPasswordManager(input);
+
+        // Wrap the parent wrapper in a fake <form autocomplete="off">
+        // This is the strongest signal Chrome respects
+        const wrapper = document.getElementById(UI_ID);
+        if (wrapper && wrapper.tagName !== 'FORM') {
+            const form = document.createElement('form');
+            form.setAttribute('autocomplete', 'off');
+            form.style.display = 'contents';
+            form.style.margin = '0';
+            form.style.padding = '0';
+
+            // Add hidden dummy fields to absorb any autofill
+            const dummyUser = document.createElement('input');
+            dummyUser.type = 'text';
+            dummyUser.name = 'email_' + Math.random().toString(36).substring(2, 6);
+            dummyUser.style.display = 'none';
+            dummyUser.setAttribute('autocomplete', 'off');
+            dummyUser.tabIndex = -1;
+            dummyUser.readOnly = true;
+
+            const dummyPass = document.createElement('input');
+            dummyPass.type = 'password';
+            dummyPass.name = 'pass_' + Math.random().toString(36).substring(2, 6);
+            dummyPass.style.display = 'none';
+            dummyPass.setAttribute('autocomplete', 'off');
+            dummyPass.tabIndex = -1;
+            dummyPass.readOnly = true;
+
+            // Insert form before wrapper, move wrapper into form, prepend dummies
+            wrapper.parentNode.insertBefore(form, wrapper);
+            form.appendChild(wrapper);
+            form.insertBefore(dummyUser, wrapper);
+            form.insertBefore(dummyPass, wrapper);
+        }
+
+        // Re-apply protection at intervals to fight Chrome's delayed heuristic checks
+        [500, 1500, 3000].forEach(delay => {
+            setTimeout(() => {
+                const el = document.getElementById(INPUT_ID);
+                if (el) {
+                    el.setAttribute('autocomplete', 'off');
+                    el.setAttribute('data-form-type', 'other');
+                }
+            }, delay);
+        });
+    }
+
+    function createSearchUi() {
+        bindSearchEvents();
+        const target = getInsertTarget();
+        const select = getSelect();
+
+        if (!target || !select) {
+            return false;
+        }
+
+        const options = getOptions();
+
+        if (options.length < 2) {
+            return false;
+        }
+
+        if (document.getElementById(UI_ID)) {
+            return true;
+        }
+
+        const wrapper = document.createElement('div');
+
+        wrapper.id = UI_ID;
+        wrapper.style.margin = '10px 0';
+        wrapper.style.padding = '10px';
+        wrapper.style.background = '#f7f7f7';
+        wrapper.style.border = '1px solid #bdbdbd';
+        wrapper.style.borderRadius = '6px';
+        wrapper.style.boxShadow =
+            '0 1px 4px rgba(0,0,0,0.15)';
+        wrapper.style.fontFamily =
+            'Arial, sans-serif';
+
+        wrapper.innerHTML = `
+            <div style="font-weight:bold; margin-bottom:6px;">
+                Search PRS User
+            </div>
+
+            <input
+    id="${INPUT_ID}"
+    type="text"
+    placeholder="Search user or value..."
+    autocomplete="off"
+    autocorrect="off"
+    autocapitalize="off"
+    spellcheck="false"
+    role="combobox"
+    aria-autocomplete="list"
+    aria-haspopup="listbox"
+    data-form-type="other"
+    style="
+        width:100%;
+        box-sizing:border-box;
+        padding:8px;
+        border:1px solid #999;
+        border-radius:4px;
+        font-size:14px;
+    "
+>
+
+            <div
+                id="${RESULTS_ID}"
+                style="
+                    display:none;
+                    margin-top:6px;
+                    max-height:280px;
+                    overflow-y:auto;
+                    background:#fff;
+                    border:1px solid #ccc;
+                    border-radius:4px;
+                    z-index:99999;
+                "
+            ></div>
+
+            <div
+                id="${STATUS_ID}"
+                style="
+                    margin-top:6px;
+                    font-size:12px;
+                    color:#444;
+                "
+            ></div>
+        `;
+
+        const selectMenuContent =
+            document.getElementById(
+                'select_user_menu_content'
+            );
+
+        if (selectMenuContent) {
+            selectMenuContent.prepend(wrapper);
+        } else {
+            target.prepend(wrapper);
+        }
+
+        bindSearchEvents();
+
+        const currentOption =
+            select.options[select.selectedIndex];
+
+        if (currentOption) {
+            document.getElementById(INPUT_ID).value =
+                currentOption.textContent.trim();
+
+            setStatus(
+                `Current: ${currentOption.textContent.trim()} (${currentOption.value})`
+            );
+        }
+
+        // Apply aggressive anti-password-manager measures
+        applyPasswordManagerDefense();
+
+        log('Search UI created.');
+
+        return true;
+    }
+
+    function bindSearchEvents() {
+        const input =
+            document.getElementById(INPUT_ID);
+
+        const resultsBox =
+            document.getElementById(RESULTS_ID);
+
+        if (!input || !resultsBox) return;
+
+        let activeIndex = -1;
+        let currentMatches = [];
+
+        function setActiveIndex(index) {
+            const rows =
+                resultsBox.querySelectorAll(
+                    '.tm-prs-search-result'
+                );
+
+            rows.forEach(row => {
+                row.style.background = '#fff';
+            });
+
+            activeIndex = index;
+
+            const activeRow = rows[activeIndex];
+
+            if (activeRow) {
+                activeRow.style.background =
+                    '#e6f0ff';
+
+                activeRow.scrollIntoView({
+                    block: 'nearest'
+                });
+            }
+        }
+
+        function renderResults(matches) {
+            resultsBox.innerHTML = '';
+            currentMatches = matches;
+            activeIndex = -1;
+
+            if (!matches.length) {
+                resultsBox.style.display =
+                    'block';
+
+                resultsBox.innerHTML = `
+                    <div style="padding:8px; color:#777;">
+                        No matches found
+                    </div>
+                `;
+
+                return;
+            }
+
+            matches.slice(0, 50).forEach(
+                (item, index) => {
+                    const row =
+                        document.createElement(
+                            'div'
+                        );
+
+                    row.className =
+                        'tm-prs-search-result';
+
+                    row.style.padding = '8px';
+                    row.style.cursor = 'pointer';
+                    row.style.borderBottom =
+                        '1px solid #eee';
+
+                    row.innerHTML = `
+                        <div style="font-weight:bold;">
+                            ${escapeHtml(item.label)}
+                        </div>
+
+                        <div style="font-size:11px; color:#666;">
+                            Value: ${escapeHtml(item.value)}
+                        </div>
+                    `;
+
+                    row.addEventListener(
+                        'mouseenter',
+                        () => {
+                            setActiveIndex(index);
+                        }
+                    );
+
+                    row.addEventListener(
+                        'click',
+                        () => {
+                            applyUser(
+                                item.value,
+                                item.label,
+                                true
+                            );
+
+                            resultsBox.style.display =
+                                'none';
+                        }
+                    );
+
+                    resultsBox.appendChild(row);
+                }
+            );
+
+            resultsBox.style.display = 'block';
+        }
+
+        function search() {
+            const query = normalize(
+                input.value.trim()
+            );
+
+            if (!query) {
+                resultsBox.style.display =
+                    'none';
+
+                resultsBox.innerHTML = '';
+
+                currentMatches = [];
+
+                return;
+            }
+
+            const matches = getOptions()
+                .map(option => {
+                    const label =
+                        normalize(option.label);
+
+                    const value =
+                        normalize(option.value);
+
+                    let score = 0;
+
+                    if (label === query)
+                        score += 100;
+
+                    if (label.startsWith(query))
+                        score += 80;
+
+                    if (label.includes(query))
+                        score += 50;
+
+                    if (value === query)
+                        score += 90;
+
+                    if (value.startsWith(query))
+                        score += 60;
+
+                    if (value.includes(query))
+                        score += 40;
+
+                    return {
+                        ...option,
+                        score
+                    };
+                })
+                .filter(
+                    option => option.score > 0
+                )
+                .sort((a, b) => {
+                    if (b.score !== a.score) {
+                        return b.score - a.score;
+                    }
+
+                    return a.label.localeCompare(
+                        b.label
+                    );
+                });
+
+            renderResults(matches);
+        }
+
+        input.addEventListener('input', search);
+
+        input.addEventListener('focus', () => {
+            if (input.value.trim()) {
+                search();
+            }
+        });
+
+        input.addEventListener(
+            'keydown',
+            event => {
+                const rows =
+                    resultsBox.querySelectorAll(
+                        '.tm-prs-search-result'
+                    );
+
+                if (
+                    event.key === 'ArrowDown'
+                ) {
+                    event.preventDefault();
+
+                    if (!rows.length) return;
+
+                    setActiveIndex(
+                        activeIndex <
+                            rows.length - 1
+                            ? activeIndex + 1
+                            : 0
+                    );
+                }
+
+                if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+
+                    if (!rows.length) return;
+
+                    setActiveIndex(
+                        activeIndex > 0
+                            ? activeIndex - 1
+                            : rows.length - 1
+                    );
+                }
+
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+
+                    if (
+                        activeIndex >= 0 &&
+                        currentMatches[
+                        activeIndex
+                        ]
+                    ) {
+                        applyUser(
+                            currentMatches[
+                                activeIndex
+                            ].value,
+                            currentMatches[
+                                activeIndex
+                            ].label,
+                            true
+                        );
+
+                        resultsBox.style.display =
+                            'none';
+
+                        return;
+                    }
+
+                    if (
+                        currentMatches.length > 0
+                    ) {
+                        applyUser(
+                            currentMatches[0]
+                                .value,
+                            currentMatches[0]
+                                .label,
+                            true
+                        );
+
+                        resultsBox.style.display =
+                            'none';
+                    }
+                }
+
+                if (
+                    event.key === 'Escape'
+                ) {
+                    resultsBox.style.display =
+                        'none';
+                }
+            }
+        );
+
+        document.addEventListener(
+            'click',
+            event => {
+                const wrapper =
+                    document.getElementById(
+                        UI_ID
+                    );
+
+                if (
+                    wrapper &&
+                    !wrapper.contains(
+                        event.target
+                    )
+                ) {
+                    resultsBox.style.display =
+                        'none';
+                }
+            }
+        );
+    }
+
+    function init() {
+        if (initialized) {
+            return;
+        }
+
+        let attempts = 0;
+
+        const interval = setInterval(() => {
+            attempts++;
+
+            const success =
+                createSearchUi();
+
+            if (success) {
+                if (initialized) {
+                    clearInterval(interval);
+                    return;
+                }
+
+                initialized = true;
+
+                clearInterval(interval);
+
+                restoreLastSelectedUser();
+
+                log(
+                    'Initialized successfully.'
+                );
+            }
+
+            if (
+                attempts >=
+                MAX_INIT_ATTEMPTS
+            ) {
+                clearInterval(interval);
+
+                log(
+                    'Failed to initialize. Panel/select was not ready.'
+                );
+            }
+        }, INIT_RETRY_MS);
+    }
+
+    function watchForPanelReloads() {
+        const observer =
+            new MutationObserver(() => {
+                const select =
+                    getSelect();
+
+                const ui =
+                    document.getElementById(
+                        UI_ID
+                    );
+
+                if (
+                    select &&
+                    !ui &&
+                    !initialized
+                ) {
+                    init();
+                }
+            });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    init();
+
+    if (document.body) {
+        watchForPanelReloads();
+    } else {
+        window.addEventListener(
+            'DOMContentLoaded',
+            watchForPanelReloads
+        );
+    }
+
+})();
