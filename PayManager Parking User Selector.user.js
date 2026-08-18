@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.1
+// @version      2.2
 // @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -29,8 +29,6 @@
     // INTERNAL CONFIG
     // =========================
 
-    const SCRIPT_NAME = 'PayManager Searchable User Selector';
-
     const SELECT_ID = 'prs_select_user';
     const BUTTON_ID = 'prs_select_user-button';
 
@@ -42,12 +40,10 @@
     const STATUS_ID = 'tm-prs-search-status';
 
     let initialized = false;
+    let initTimer = null;
+    let outsideClickBound = false;
     let restoring = false;
     let lastAppliedValue = null;
-
-    function log(message) {
-        console.log(`[${SCRIPT_NAME}] ${message}`);
-    }
 
     function getSelect() {
         return document.getElementById(SELECT_ID);
@@ -141,8 +137,8 @@
                     $select.selectmenu('refresh');
                 }
             }
-        } catch (error) {
-            log(`jQuery Mobile refresh failed: ${error.message}`);
+        } catch {
+            // The native select events above still apply the selection.
         }
     }
 
@@ -155,14 +151,18 @@
     }
 
     function saveSelectedUser(value, label) {
-        localStorage.setItem(
-            STORAGE_KEY,
-            JSON.stringify({
-                value,
-                label,
-                savedAt: Date.now()
-            })
-        );
+        try {
+            localStorage.setItem(
+                STORAGE_KEY,
+                JSON.stringify({
+                    value,
+                    label,
+                    savedAt: Date.now()
+                })
+            );
+        } catch {
+            // Selection still works when browser storage is unavailable.
+        }
     }
 
     function getSavedSelectedUser() {
@@ -177,7 +177,6 @@
         const select = getSelect();
 
         if (!select) {
-            log('Select element not found.');
             return false;
         }
 
@@ -224,10 +223,6 @@
         setStatus(
             `Selected: ${option.label} (${option.value})`,
             'green'
-        );
-
-        log(
-            `Applied user: ${option.label} (${option.value})`
         );
 
         return true;
@@ -358,7 +353,6 @@
     }
 
     function createSearchUi() {
-        bindSearchEvents();
         const target = getInsertTarget();
         const select = getSelect();
 
@@ -467,8 +461,6 @@
 
         // Apply aggressive anti-password-manager measures
         applyPasswordManagerDefense();
-
-        log('Search UI created.');
 
         return true;
     }
@@ -738,35 +730,32 @@
             }
         );
 
-        document.addEventListener(
-            'click',
-            event => {
-                const wrapper =
-                    document.getElementById(
-                        UI_ID
-                    );
+        if (!outsideClickBound) {
+            outsideClickBound = true;
+
+            document.addEventListener('click', event => {
+                const wrapper = document.getElementById(UI_ID);
+                const currentResults = document.getElementById(RESULTS_ID);
 
                 if (
                     wrapper &&
-                    !wrapper.contains(
-                        event.target
-                    )
+                    currentResults &&
+                    !wrapper.contains(event.target)
                 ) {
-                    resultsBox.style.display =
-                        'none';
+                    currentResults.style.display = 'none';
                 }
-            }
-        );
+            });
+        }
     }
 
     function init() {
-        if (initialized) {
+        if (initialized || initTimer !== null) {
             return;
         }
 
         let attempts = 0;
 
-        const interval = setInterval(() => {
+        initTimer = setInterval(() => {
             attempts++;
 
             const success =
@@ -774,30 +763,25 @@
 
             if (success) {
                 if (initialized) {
-                    clearInterval(interval);
+                    clearInterval(initTimer);
+                    initTimer = null;
                     return;
                 }
 
                 initialized = true;
 
-                clearInterval(interval);
+                clearInterval(initTimer);
+                initTimer = null;
 
                 restoreLastSelectedUser();
-
-                log(
-                    'Initialized successfully.'
-                );
             }
 
             if (
                 attempts >=
                 MAX_INIT_ATTEMPTS
             ) {
-                clearInterval(interval);
-
-                log(
-                    'Failed to initialize. Panel/select was not ready.'
-                );
+                clearInterval(initTimer);
+                initTimer = null;
             }
         }, INIT_RETRY_MS);
     }
@@ -815,9 +799,9 @@
 
                 if (
                     select &&
-                    !ui &&
-                    !initialized
+                    !ui
                 ) {
+                    initialized = false;
                     init();
                 }
             });

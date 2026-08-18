@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Parking Extractor
 // @namespace    https://nidushan.com
-// @version      6.7
+// @version      6.8
 // @description  Extract license plate and all parkings, MUI-styled centered UI, copy plate and screenshot
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -21,9 +21,6 @@
     /************************************************************
      * SETTINGS
      ************************************************************/
-
-    const SCRIPT_NAME = 'PassPay Parking Extractor';
-    const DEBUG = true;
 
     const PAYMANAGER_CHAINID_URL = 'https://paymanager.logos.dk/transactions?chainid=';
     const STORAGE_KEY = 'tm-parking-data-v6-mui-location';
@@ -52,28 +49,7 @@
 
     let latestData = null;
     let lastUrl = location.href;
-
-    /************************************************************
-     * LOGGING
-     ************************************************************/
-
-    function log(message, data = '') {
-        if (!DEBUG) return;
-
-        console.log(
-            `%c[${SCRIPT_NAME}] ${message}`,
-            'color:#1565c0; font-weight:bold;',
-            data
-        );
-    }
-
-    function warn(message, data = '') {
-        console.warn(`[${SCRIPT_NAME}] ${message}`, data);
-    }
-
-    function error(message, data = '') {
-        console.error(`[${SCRIPT_NAME}] ${message}`, data);
-    }
+    let retryTimer = null;
 
     /************************************************************
      * GLOBAL CSS
@@ -296,31 +272,6 @@
                 font-weight: 600;
             }
 
-            .tm-parking-debug {
-                margin-top: 14px;
-                font-family: Roboto, Helvetica, Arial, sans-serif;
-                font-size: 0.8125rem;
-                line-height: 1.43;
-                color: rgba(0, 0, 0, 0.60);
-            }
-
-            .tm-parking-debug summary {
-                cursor: pointer;
-                font-weight: 500;
-            }
-
-            .tm-parking-debug-pre {
-                margin-top: 8px;
-                white-space: pre-wrap;
-                background-color: #f1f5f9;
-                padding: 10px;
-                border-radius: 4px;
-                border: 1px solid rgba(0, 0, 0, 0.12);
-                color: rgba(0, 0, 0, 0.87);
-                font-family: Consolas, Monaco, monospace;
-                font-size: 0.75rem;
-            }
-
             .tm-parking-message-pre {
                 margin-top: 8px;
                 padding: 10px;
@@ -383,8 +334,7 @@
                 XPathResult.FIRST_ORDERED_NODE_TYPE,
                 null
             ).singleNodeValue;
-        } catch (err) {
-            warn('Invalid XPath', { xpath, err });
+        } catch {
             return null;
         }
     }
@@ -402,8 +352,6 @@
         if (options.id) element.id = options.id;
         if (options.className) element.className = options.className;
         if (options.textContent !== undefined) element.textContent = options.textContent;
-        if (options.innerHTML !== undefined) element.innerHTML = options.innerHTML;
-
         if (options.attributes) {
             Object.entries(options.attributes).forEach(([key, value]) => {
                 element.setAttribute(key, value);
@@ -427,10 +375,7 @@
     function getVisiblePlateFromPage() {
         const element = getElementByXPath(VISIBLE_PLATE_XPATH);
 
-        if (!element) {
-            log('Visible plate element not found');
-            return '';
-        }
+        if (!element) return '';
 
         let text = element.textContent.trim();
 
@@ -438,11 +383,7 @@
             text = text.split('(')[0].trim();
         }
 
-        const plate = normalizePlate(text);
-
-        log('Visible plate from page', plate);
-
-        return plate;
+        return normalizePlate(text);
     }
 
     function getMostCommonPlate(parkings) {
@@ -651,7 +592,6 @@
         const target = getElementByXPath(INFO_BOX_TARGET_XPATH);
 
         if (!target) {
-            warn('Cannot show message box because target XPath was not found', INFO_BOX_TARGET_XPATH);
             return false;
         }
 
@@ -734,8 +674,7 @@
 
             setStatus(`Saved: ${fileName}`, 'success');
 
-        } catch (err) {
-            error('Screenshot failed', err);
+        } catch {
             setStatus('Screenshot failed', 'error');
         }
     }
@@ -771,26 +710,20 @@
     function extractParkingEntries(data) {
         const entries = [];
 
-        function walk(obj, path = 'root', inheritedLocation = '') {
+        function walk(obj, inheritedLocation = '') {
             if (!obj || typeof obj !== 'object') return;
 
             if (Array.isArray(obj)) {
-                obj.forEach((item, index) => {
-                    walk(item, `${path}[${index}]`, inheritedLocation);
-                });
+                obj.forEach(item => walk(item, inheritedLocation));
                 return;
             }
 
             const currentLocation = obj.location ?? inheritedLocation ?? '';
 
             if (Array.isArray(obj.parkings)) {
-                log(`Found parkings array at ${path}`, obj.parkings);
-
-                obj.parkings.forEach((parking, index) => {
+                obj.parkings.forEach(parking => {
                     if (looksLikeParkingObject(parking)) {
                         entries.push(normalizeParkingObject(parking, currentLocation));
-                    } else {
-                        log(`Skipping parking object at ${path}.parkings[${index}] because it does not look like parking`, parking);
                     }
                 });
             }
@@ -804,7 +737,7 @@
             }
 
             Object.entries(obj).forEach(([key, value]) => {
-                walk(value, `${path}.${key}`, currentLocation);
+                if (key !== 'parkings') walk(value, currentLocation);
             });
         }
 
@@ -820,8 +753,6 @@
             seen.add(key);
             return true;
         });
-
-        log(`Extracted ${uniqueEntries.length} unique parking entries`, uniqueEntries);
 
         return uniqueEntries;
     }
@@ -846,25 +777,12 @@
         });
 
         if (!matchingParkings.length) {
-            warn('No exact plate match found. Showing all parkings instead.', {
-                selectedPlate,
-                visiblePlate,
-                commonPlate,
-                allParkings
-            });
-
             matchingParkings = allParkings;
         }
 
         return {
             licensePlate: selectedPlate,
-            parkings: matchingParkings,
-            debug: {
-                visiblePlate,
-                commonPlate,
-                totalFound: allParkings.length,
-                matched: matchingParkings.length
-            }
+            parkings: matchingParkings
         };
     }
 
@@ -881,8 +799,6 @@
 
             latestData = parsed;
             localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-
-            log('Parking data stored from network response', parsed);
 
             if (isParkingPage()) {
                 setTimeout(retryInject, 300);
@@ -901,7 +817,6 @@
         const target = getElementByXPath(INFO_BOX_TARGET_XPATH);
 
         if (!target) {
-            warn('Info box target XPath not found', INFO_BOX_TARGET_XPATH);
             return false;
         }
 
@@ -961,23 +876,6 @@
             className: 'tm-parking-status'
         }));
 
-        if (DEBUG && data.debug) {
-            const details = createElement('details', {
-                className: 'tm-parking-debug'
-            });
-
-            details.appendChild(createElement('summary', {
-                textContent: 'Debug info v6.7'
-            }));
-
-            details.appendChild(createElement('pre', {
-                className: 'tm-parking-debug-pre',
-                textContent: JSON.stringify(data.debug, null, 2)
-            }));
-
-            box.appendChild(details);
-        }
-
         box.appendChild(createCreatorFooter());
 
         return true;
@@ -1019,15 +917,14 @@
             const response = await originalFetch.apply(this, args);
 
             try {
-                response.clone().text().then(processResponse);
-            } catch (err) {
-                warn('Fetch clone/read failed', err);
+                response.clone().text().then(processResponse).catch(() => {});
+            } catch {
+                // Ignore responses that cannot be cloned.
             }
 
             return response;
         };
 
-        log('fetch hook installed');
     }
 
     function hookXMLHttpRequest() {
@@ -1037,15 +934,14 @@
             this.addEventListener('load', function () {
                 try {
                     processResponse(this.responseText);
-                } catch (err) {
-                    warn('XHR response processing failed', err);
+                } catch {
+                    // Ignore non-text responses.
                 }
             });
 
             return originalOpen.apply(this, args);
         };
 
-        log('XHR hook installed');
     }
 
     /************************************************************
@@ -1061,11 +957,11 @@
     }
 
     function retryInject() {
+        if (retryTimer !== null) return;
+
         let attempts = 0;
 
-        log('Starting retryInject');
-
-        const interval = setInterval(() => {
+        retryTimer = setInterval(() => {
             attempts++;
 
             const data = latestData || getStoredData();
@@ -1074,28 +970,27 @@
                 const success = insertData(data);
 
                 if (success) {
-                    log(`Injected successfully after ${attempts} attempt(s)`);
-                    clearInterval(interval);
+                    clearInterval(retryTimer);
+                    retryTimer = null;
                     return;
                 }
             } else {
                 if (attempts === 3) {
                     showMessageBox(
                         'Waiting for parking data...',
-                        'No matching network response has been captured yet. Try running the search again, then check Console logs for details.'
+                        'No matching network response has been captured yet. Try running the search again.'
                     );
                 }
             }
 
             if (attempts >= MAX_RETRY_ATTEMPTS) {
-                warn('retryInject timed out with no display');
-
                 showMessageBox(
                     'No parking data found.',
-                    'The script did not capture a JSON response containing parkings[]. Open DevTools Console and look for [PassPay Parking Extractor] logs.'
+                    'The script did not capture a JSON response containing parkings[]. Try running the search again.'
                 );
 
-                clearInterval(interval);
+                clearInterval(retryTimer);
+                retryTimer = null;
             }
 
         }, RETRY_INTERVAL_MS);
@@ -1114,8 +1009,6 @@
 
         lastUrl = location.href;
 
-        log('URL changed', location.href);
-
         if (isParkingPage()) {
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
         }
@@ -1129,7 +1022,6 @@
             childList: true
         });
 
-        log('Navigation observer started');
     }
 
     /************************************************************
@@ -1137,11 +1029,6 @@
      ************************************************************/
 
     function start() {
-        log('Script active', {
-            href: location.href,
-            isParkingPage: isParkingPage()
-        });
-
         if (isParkingPage()) {
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
         }
@@ -1160,8 +1047,6 @@
     }
 
     window.addEventListener('load', () => {
-        log('Window load event');
-
         if (isParkingPage()) {
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
         }

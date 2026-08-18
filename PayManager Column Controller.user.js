@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         PayManager Column Controller
-// @namespace    https://nidushan.com/
-// @version      1.0
+// @namespace    https://nidushan.com
+// @version      1.1
 // @description  Enable and disable selected PayManager columns automatically
 // @author       Jan Sinnadurai
-// @homepageURL  https://nidushan.com/
+// @homepageURL  https://nidushan.com
+// @supportURL   https://nidushan.com
 // @match        https://paymanager.logos.dk/transactions*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Column%20Controller.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Column%20Controller.user.js
 // @grant        none
+// @run-at       document-idle
 // ==/UserScript==
 
 (function () {
@@ -51,19 +53,6 @@
      * HELPERS
      ************************************************************/
 
-    function log(step, msg, data = "") {
-        console.log(
-            `[%cCOLUMNS:${step}%c] ${msg}`,
-            "color: #7b1fa2; font-weight: bold;",
-            "",
-            data
-        );
-    }
-
-    function warn(step, msg, data = "") {
-        console.warn(`[COLUMNS:${step}] ${msg}`, data);
-    }
-
     function getXPath(xpath) {
         return document.evaluate(
             xpath,
@@ -83,8 +72,6 @@
      ************************************************************/
 
     function closePopup() {
-        log("CLOSE", "Closing popup...");
-
         // 1) Try pressing Escape via keydown + keyup on document and window
         const escapeOpts = {
             key: "Escape",
@@ -110,7 +97,6 @@
                 'a.x, i.x, button:has(svg), button:has(span)'
             );
             if (closeBtn) {
-                log("CLOSE", "Found close button inside popup, clicking it", closeBtn);
                 closeBtn.click();
             } else {
                 // 3) Try clicking on a backdrop/overlay if one exists
@@ -119,13 +105,10 @@
                     'div[class*="backdrop"], div[class*="overlay"]'
                 );
                 if (backdrop) {
-                    log("CLOSE", "Found backdrop overlay, clicking it", backdrop);
                     backdrop.click();
                 }
             }
         }
-
-        log("CLOSE", "Close attempts completed");
     }
 
     /************************************************************
@@ -133,18 +116,13 @@
      ************************************************************/
 
     async function openColumnsPanel() {
-        log("OPEN", "Trying to open Columns panel...");
-
         const btn = getXPath(columnsTabXPath);
 
         if (!btn) {
-            warn("OPEN", "Columns button not found");
             return false;
         }
 
         btn.click();
-        log("OPEN", "Columns button clicked");
-
         await sleep(PANEL_OPEN_DELAY_MS);
 
         return true;
@@ -154,18 +132,14 @@
         let popup = getXPath(popupXPath);
 
         if (popup) {
-            log("POPUP", "Popup found using XPath", popup);
             return popup;
         }
-
-        warn("POPUP", "Popup XPath failed. Trying fallback search...");
 
         const candidates = Array.from(document.querySelectorAll("body div"))
             .filter(div => div.querySelectorAll("ul a").length > 5);
 
         if (candidates.length > 0) {
             popup = candidates[candidates.length - 1];
-            log("POPUP", "Popup found using fallback", popup);
             return popup;
         }
 
@@ -173,61 +147,41 @@
     }
 
     async function toggleColumns() {
-        log("TOGGLE", "Starting column toggle logic");
-
         const popup = findColumnsPopup();
 
         if (!popup) {
-            warn("TOGGLE", "Popup not found. Cannot toggle columns.");
             return;
         }
 
         const items = popup.querySelectorAll("ul a");
-
-        log("TOGGLE", `Found ${items.length} column buttons`);
 
         items.forEach(el => {
             const classes = Array.from(el.classList);
 
             columnsToDisable.forEach(target => {
                 if (classes.includes(target)) {
-                    log("DISABLE MATCH", target, el);
-
                     if (el.classList.contains("toggled")) {
-                        log("DISABLE ACTION", `Turning OFF ${target}`);
                         el.click();
-                    } else {
-                        log("DISABLE SKIP", `${target} already OFF`);
                     }
                 }
             });
 
             columnsToEnable.forEach(target => {
                 if (classes.includes(target)) {
-                    log("ENABLE MATCH", target, el);
-
                     if (!el.classList.contains("toggled")) {
-                        log("ENABLE ACTION", `Turning ON ${target}`);
                         el.click();
-                    } else {
-                        log("ENABLE SKIP", `${target} already ON`);
                     }
                 }
             });
         });
-
-        log("DONE", "Column processing completed");
     }
 
     async function runColumnsController() {
-        log("INIT", `Waiting ${START_DELAY_MS / 1000} seconds before starting...`);
-
         await sleep(START_DELAY_MS);
 
         const opened = await openColumnsPanel();
 
         if (!opened) {
-            warn("INIT", "Could not open columns panel");
             return;
         }
 
@@ -236,10 +190,12 @@
         await sleep(CLOSE_POPUP_DELAY_MS);
 
         closePopup();
-
-        log("INIT", "Columns Controller finished");
     }
 
-    window.addEventListener("load", runColumnsController);
+    if (document.readyState === "complete") {
+        runColumnsController();
+    } else {
+        window.addEventListener("load", runColumnsController, { once: true });
+    }
 
 })();

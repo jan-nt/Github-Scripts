@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         PayManager Image Row Highlighter
-// @namespace    https://nidushan.com/
-// @version      1.5
-// @description  Highlight rows with Event->Camera->Image
+// @namespace    https://nidushan.com
+// @version      1.6
+// @description  Highlights transaction rows containing Event, Camera, and Image details
 // @author       Jan Sinnadurai
-// @homepageURL  https://nidushan.com/
+// @homepageURL  https://nidushan.com
+// @supportURL   https://nidushan.com
 // @match        https://paymanager.logos.dk/transactions*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Image%20Row%20Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Image%20Row%20Highlighter.user.js
@@ -37,13 +38,6 @@
     `;
     document.head.appendChild(style);
 
-    /************************************************************
-     * HELPERS
-     ************************************************************/
-    function log(msg) {
-        console.log('[PayManager]', msg);
-    }
-
     function normalize(text) {
         return (text || '').replace(/\s+/g, ' ').trim();
     }
@@ -74,7 +68,6 @@
         if (rowHasEventCameraImage(row)) {
             if (!row.classList.contains('image_highlight')) {
                 row.classList.add('image_highlight');
-                log('Highlighted row ' + (row.getAttribute('data-rowid') || row.rowIndex));
                 return true;
             }
         } else {
@@ -102,24 +95,18 @@
 
         try {
             const tables = document.querySelectorAll('table');
-            let highlightCount = 0;
-
             tables.forEach(table => {
                 const rows = table.querySelectorAll('tbody tr');
                 rows.forEach(row => {
                     try {
-                        if (applyImageHighlight(row)) highlightCount++;
-                    } catch (rowErr) {
+                        applyImageHighlight(row);
+                    } catch {
                         // Ignore errors on individual rows
                     }
                 });
             });
-
-            if (highlightCount > 0) {
-                log('Scan: ' + highlightCount + ' highlighted');
-            }
-        } catch (err) {
-            console.warn('[PayManager] Scan error:', err);
+        } catch {
+            // Ignore transient table redraw errors and retry on the next scan.
         } finally {
             scanning = false;
         }
@@ -128,15 +115,12 @@
     /************************************************************
      * SCHEDULING
      ************************************************************/
-    let pollTimer = null;
-
     function startPolling() {
         // Do an initial scan after a short delay (page may still load)
         setTimeout(scanAllRows, INITIAL_SCAN_DELAY_MS);
 
         // Poll regularly to catch any dynamic content
-        pollTimer = setInterval(scanAllRows, POLL_INTERVAL_MS);
-        log('Polling started every ' + POLL_INTERVAL_MS + 'ms');
+        setInterval(scanAllRows, POLL_INTERVAL_MS);
     }
 
     /************************************************************
@@ -161,6 +145,6 @@
     /************************************************************
      * START
      ************************************************************/
-    window.addEventListener('load', startPolling);
+    startPolling();
 
 })();

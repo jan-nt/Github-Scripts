@@ -1,15 +1,14 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      1.6
+// @version      1.7
 // @description  Converts ChainID and PaymentID values into clickable links and adds smart search helpers
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
 // @supportURL   https://nidushan.com
 // @match        https://betaling.passpay.no/administration*
-// @updateURL    https://github.com/jan-nt/Github-Scripts/raw/refs/heads/main/PassPay%20UserAdmin%20ChainID%20and%20PaymentID.js
-// @downloadURL  https://github.com/jan-nt/Github-Scripts/raw/refs/heads/main/PassPay%20UserAdmin%20ChainID%20and%20PaymentID.js
-
+// @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PassPay%20UserAdmin.user.js
+// @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PassPay%20UserAdmin.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -201,9 +200,6 @@
             setTimeout(cleanValue, 0);
         });
 
-        console.log(
-            '[PassPay Search Helper] Smart space removal active'
-        );
     }
 
     // ============================================================
@@ -423,14 +419,25 @@
         addSmartSpaceRemoval();
     }
 
+    let runScheduled = false;
+
+    function scheduleRun() {
+        if (runScheduled) return;
+
+        runScheduled = true;
+
+        requestAnimationFrame(() => {
+            runScheduled = false;
+            run();
+        });
+    }
+
     injectStyles();
 
     run();
 
     const observer =
-        new MutationObserver(() => {
-            run();
-        });
+        new MutationObserver(scheduleRun);
 
     observer.observe(
         document.body,
@@ -443,13 +450,9 @@
     [500, 1500, 3000, 5000]
         .forEach(delay => {
             setTimeout(
-                run,
+                scheduleRun,
                 delay
             );
         });
-
-    console.log(
-        '[PassPay UserAdmin ChainID, PaymentID & Search Helper] Active'
-    );
 
 })();
