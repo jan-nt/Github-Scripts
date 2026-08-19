@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Background Session Keeper
 // @namespace    https://nidushan.com
-// @version      3.1
+// @version      3.2
 // @description  Keeps DIBS and Riverty sessions active and resumes login when their login pages appear
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -22,6 +22,8 @@
     const ACTIVE_RETRY_MS = 30 * 1000;
     const LOGIN_RETRY_MS = 1000;
     const LOGIN_WAIT_MS = 30 * 1000;
+    const LOGIN_CLICK_RETRY_MS = 15 * 1000;
+    const MAX_LOGIN_CLICKS = 3;
     const ONLY_REFRESH_IN_BACKGROUND = true;
 
     const STORAGE_KEY = 'general_session_keeper_next_refresh_v3';
@@ -53,6 +55,8 @@
     let refreshTimer = null;
     let loginTimer = null;
     let loginClicked = false;
+    let loginClickAttempts = 0;
+    let loginRefreshReset = false;
     let memoryNextRefreshTime = null;
 
     function getLoginPage() {
@@ -100,7 +104,19 @@
 
             if (button && !button.disabled) {
                 loginClicked = true;
+                loginClickAttempts++;
                 button.click();
+
+                loginTimer = window.setTimeout(() => {
+                    loginTimer = null;
+
+                    if (!getLoginPage()) return;
+                    if (loginClickAttempts >= MAX_LOGIN_CLICKS) return;
+
+                    loginClicked = false;
+                    checkRefresh();
+                }, LOGIN_CLICK_RETRY_MS);
+
                 return;
             }
 
@@ -168,6 +184,11 @@
         const loginPage = getLoginPage();
 
         if (loginPage) {
+            if (!loginRefreshReset) {
+                createNextRefreshTime();
+                loginRefreshReset = true;
+            }
+
             if (loginTimer === null && !loginClicked) {
                 tryLogin(loginPage);
             }
