@@ -19,7 +19,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 - No credentials, API keys, access tokens, or private keys are included.
 - The session keeper clicks existing login buttons but does not read or store credentials.
 - Extracted parking data is stored only in the site browser storage and expires after 30 minutes.
-- Area Manager handoffs use the URL fragment, which is not sent to the PayManager server.
+- Area Manager and license plate handoffs use the URL fragment, which is not sent to the PayManager server.
 - Install both PassPay Search Admin Panel and PayManager Parking User Selector to enable automatic Area Manager selection.
 - The last selected PayManager parking user is stored only in the site browser storage and expires after 30 days.
 - The parking extractor loads html2canvas 1.4.1 from jsDelivr for local screenshot creation.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Search Admin Panel
 // @namespace    https://nidushan.com
-// @version      7.0
+// @version      7.1
 // @description  Displays parking details with copy, screenshot, Chain ID, and PayManager handoff tools
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -31,6 +31,7 @@
     const PAYMANAGER_CHAINID_URL = 'https://paymanager.logos.dk/transactions?chainid=';
     const PAYMANAGER_PARKING_URL = 'https://paymanager.logos.dk/parking';
     const PAYMANAGER_AREA_MANAGER_PARAM = 'tmAreaManager';
+    const PAYMANAGER_LICENSE_PLATE_PARAM = 'tmLicensePlate';
     const STORAGE_KEY = 'tm-parking-data-v6-mui-location';
     const STORAGE_MAX_AGE_MS = 30 * 60 * 1000;
 
@@ -453,16 +454,18 @@
         });
     }
 
-    function openPayManagerForAreaManager(areaManager) {
-        const value = String(areaManager || '').trim();
+    function openPayManagerParking(areaManager, licensePlate) {
+        const managerValue = String(areaManager || '').trim();
+        const plateValue = normalizePlate(licensePlate);
 
-        if (!value) {
+        if (!managerValue) {
             setStatus('Area Manager is missing', 'error');
             return;
         }
 
         const params = new URLSearchParams({
-            [PAYMANAGER_AREA_MANAGER_PARAM]: value
+            [PAYMANAGER_AREA_MANAGER_PARAM]: managerValue,
+            [PAYMANAGER_LICENSE_PLATE_PARAM]: plateValue
         });
 
         const url = `${PAYMANAGER_PARKING_URL}#${params.toString()}`;
@@ -473,7 +476,11 @@
         link.rel = 'noopener noreferrer';
         link.click();
 
-        setStatus(`Opening PayManager for ${value}`, 'success');
+        setStatus(
+            `Opening PayManager for ${managerValue}` +
+            (plateValue ? ` (${plateValue})` : ''),
+            'success'
+        );
     }
 
     function setStatus(message, colorClass = '') {
@@ -906,7 +913,7 @@
         }
 
         parkings.forEach((parking, index) => {
-            box.appendChild(createParkingCard(parking, index + 1));
+            box.appendChild(createParkingCard(parking, index + 1, plate));
         });
 
         box.appendChild(createElement('div', {
@@ -919,7 +926,7 @@
         return true;
     }
 
-    function createParkingCard(parking, number) {
+    function createParkingCard(parking, number, licensePlate) {
         const card = createElement('div', {
             className: 'tm-parking-card'
         });
@@ -947,7 +954,10 @@
             });
 
             actionRow.appendChild(createButton('Open in PayManager', () => {
-                openPayManagerForAreaManager(parking.areaManager);
+                openPayManagerParking(
+                    parking.areaManager,
+                    parking.licensePlate || licensePlate
+                );
             }));
 
             card.appendChild(actionRow);

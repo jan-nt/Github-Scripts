@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.4
+// @version      2.5
 // @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -36,8 +36,13 @@
     const STORAGE_KEY = 'pm_selected_prs_user';
     const STORAGE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
     const AREA_MANAGER_PARAM = 'tmAreaManager';
+    const LICENSE_PLATE_PARAM = 'tmLicensePlate';
+    const HANDOFF_STORAGE_KEY = 'pm_parking_handoff_v1';
+    const HANDOFF_MAX_AGE_MS = 5 * 60 * 1000;
     const HANDOFF_RETRY_MS = 500;
     const HANDOFF_MAX_ATTEMPTS = 30;
+    const PARKING_SEARCH_INPUT_XPATH =
+        '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[4]/label/form/input';
 
     const UI_ID = 'tm-prs-search-box';
     const INPUT_ID = 'tm-prs-search-input';
@@ -70,6 +75,13 @@
             .toLowerCase()
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    function normalizePlate(value) {
+        return String(value || '')
+            .trim()
+            .toUpperCase()
+            .replace(/\s+/g, '');
     }
 
     function escapeHtml(value) {
@@ -106,16 +118,69 @@
         );
     }
 
-    function getRequestedAreaManager() {
-        if (!location.hash.startsWith('#')) return '';
-
-        const params = new URLSearchParams(location.hash.slice(1));
-        return String(params.get(AREA_MANAGER_PARAM) || '').trim();
+    function savePendingHandoff(handoff) {
+        try {
+            sessionStorage.setItem(
+                HANDOFF_STORAGE_KEY,
+                JSON.stringify({
+                    ...handoff,
+                    savedAt: Date.now()
+                })
+            );
+        } catch {
+            // The URL fragment remains available when storage is blocked.
+        }
     }
 
-    function clearRequestedAreaManager() {
+    function getRequestedHandoff() {
+        const params = new URLSearchParams(location.hash.slice(1));
+        const fromUrl = {
+            areaManager: String(params.get(AREA_MANAGER_PARAM) || '').trim(),
+            licensePlate: normalizePlate(params.get(LICENSE_PLATE_PARAM))
+        };
+
+        if (fromUrl.areaManager || fromUrl.licensePlate) {
+            savePendingHandoff(fromUrl);
+            return fromUrl;
+        }
+
+        try {
+            const stored = JSON.parse(
+                sessionStorage.getItem(HANDOFF_STORAGE_KEY)
+            );
+
+            if (
+                stored &&
+                Number.isFinite(stored.savedAt) &&
+                Date.now() - stored.savedAt <= HANDOFF_MAX_AGE_MS
+            ) {
+                return {
+                    areaManager: String(stored.areaManager || '').trim(),
+                    licensePlate: normalizePlate(stored.licensePlate)
+                };
+            }
+
+            sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+        } catch {
+            // Ignore unavailable or malformed session storage.
+        }
+
+        return {
+            areaManager: '',
+            licensePlate: ''
+        };
+    }
+
+    function clearRequestedHandoff() {
+        try {
+            sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+        } catch {
+            // Ignore unavailable session storage.
+        }
+
         const params = new URLSearchParams(location.hash.slice(1));
         params.delete(AREA_MANAGER_PARAM);
+        params.delete(LICENSE_PLATE_PARAM);
 
         const remainingHash = params.toString();
         const cleanUrl =
@@ -124,6 +189,40 @@
             (remainingHash ? `#${remainingHash}` : '');
 
         history.replaceState(history.state, '', cleanUrl);
+    }
+
+    function getElementByXPath(xpath) {
+        try {
+            return document.evaluate(
+                xpath,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+            ).singleNodeValue;
+        } catch {
+            return null;
+        }
+    }
+
+    function getParkingSearchInput() {
+        return getElementByXPath(PARKING_SEARCH_INPUT_XPATH);
+    }
+
+    function setParkingSearchValue(input, licensePlate) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            'value'
+        )?.set;
+
+        if (nativeSetter) {
+            nativeSetter.call(input, licensePlate);
+        } else {
+            input.value = licensePlate;
+        }
+
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function findAreaManagerOption(areaManager) {
@@ -316,30 +415,82 @@
         }, RESTORE_DELAY_MS);
     }
 
-    function applyRequestedAreaManager() {
-        const areaManager = getRequestedAreaManager();
+    function applyRequestedHandoff() {
+        const initialHandoff = getRequestedHandoff();
 
-        if (!areaManager) return false;
+        if (!initialHandoff.areaManager && !initialHandoff.licensePlate) {
+            return false;
+        }
+
         if (handoffTimer !== null) return true;
 
         let attempts = 0;
+        let areaManagerApplied = !initialHandoff.areaManager;
+        let areaManagerAppliedAt = 0;
+        let lastPlateInput = null;
+        let stablePlateChecks = 0;
 
         function attemptSelection() {
             handoffTimer = null;
             attempts++;
 
-            const requested = getRequestedAreaManager();
-            if (!requested) return;
+            const handoff = getRequestedHandoff();
 
-            const option = findAreaManagerOption(requested);
+            if (!handoff.areaManager && !handoff.licensePlate) return;
 
-            if (option && applyUser(option.value, option.label, true)) {
-                clearRequestedAreaManager();
+            if (!areaManagerApplied) {
+                const option = findAreaManagerOption(handoff.areaManager);
+
+                if (option && applyUser(option.value, option.label, true)) {
+                    areaManagerApplied = true;
+                    areaManagerAppliedAt = Date.now();
+                    setStatus(`Selected Area Manager: ${option.label}`, 'green');
+                }
+            }
+
+            if (areaManagerApplied && !handoff.licensePlate) {
+                clearRequestedHandoff();
                 return;
             }
 
+            if (
+                areaManagerApplied &&
+                Date.now() - areaManagerAppliedAt >= HANDOFF_RETRY_MS
+            ) {
+                const input = getParkingSearchInput();
+
+                if (input) {
+                    const currentPlate = normalizePlate(input.value);
+
+                    if (currentPlate !== handoff.licensePlate) {
+                        setParkingSearchValue(input, handoff.licensePlate);
+                        lastPlateInput = input;
+                        stablePlateChecks = 0;
+                    } else if (input === lastPlateInput) {
+                        stablePlateChecks++;
+
+                        if (stablePlateChecks >= 1) {
+                            clearRequestedHandoff();
+                            setStatus(
+                                `Ready: ${handoff.licensePlate}`,
+                                'green'
+                            );
+                            input.focus();
+                            return;
+                        }
+                    } else {
+                        lastPlateInput = input;
+                        stablePlateChecks = 0;
+                    }
+                }
+            }
+
             if (attempts < HANDOFF_MAX_ATTEMPTS) {
-                setStatus(`Selecting Area Manager: ${requested}`);
+                const action = areaManagerApplied
+                    ? `Entering plate: ${handoff.licensePlate}`
+                    : `Selecting Area Manager: ${handoff.areaManager}`;
+
+                setStatus(action);
                 handoffTimer = window.setTimeout(
                     attemptSelection,
                     HANDOFF_RETRY_MS
@@ -348,7 +499,9 @@
             }
 
             setStatus(
-                `Area Manager not found: ${requested}`,
+                areaManagerApplied
+                    ? `License plate input not found: ${handoff.licensePlate}`
+                    : `Area Manager not found: ${handoff.areaManager}`,
                 'red'
             );
         }
@@ -865,7 +1018,7 @@
                 clearInterval(initTimer);
                 initTimer = null;
 
-                if (!applyRequestedAreaManager()) {
+                if (!applyRequestedHandoff()) {
                     restoreLastSelectedUser();
                 }
             }
