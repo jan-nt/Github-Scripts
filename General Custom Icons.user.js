@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Custom Icons
 // @namespace    https://nidushan.com
-// @version      2.2
+// @version      2.3
 // @description  Custom tab titles and persistent favicons for PassPay and PayManager pages
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -36,6 +36,18 @@
             pathRegex: /^\/administration(\/|$)/,
             title: 'Admin',
             emoji: '⚙️'
+        },
+        {
+            host: 'betaling.passpay.no',
+            pathRegex: /^\/place-administration(\/|$)/,
+            title: 'Loc-Admin',
+            emoji: '📌'
+        },
+        {
+            host: 'betaling.passpay.no',
+            pathRegex: /^\/vehicles(\/|$)/,
+            title: 'Car',
+            emoji: '🚗'
         },
         {
             host: 'paymanager.logos.dk',
