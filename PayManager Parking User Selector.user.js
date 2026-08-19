@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.3
+// @version      2.4
 // @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -35,6 +35,9 @@
 
     const STORAGE_KEY = 'pm_selected_prs_user';
     const STORAGE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+    const AREA_MANAGER_PARAM = 'tmAreaManager';
+    const HANDOFF_RETRY_MS = 500;
+    const HANDOFF_MAX_ATTEMPTS = 30;
 
     const UI_ID = 'tm-prs-search-box';
     const INPUT_ID = 'tm-prs-search-input';
@@ -43,6 +46,7 @@
 
     let initialized = false;
     let initTimer = null;
+    let handoffTimer = null;
     let outsideClickBound = false;
     let restoring = false;
     let lastAppliedValue = null;
@@ -100,6 +104,40 @@
         return getOptions().find(
             option => normalize(option.label) === wanted
         );
+    }
+
+    function getRequestedAreaManager() {
+        if (!location.hash.startsWith('#')) return '';
+
+        const params = new URLSearchParams(location.hash.slice(1));
+        return String(params.get(AREA_MANAGER_PARAM) || '').trim();
+    }
+
+    function clearRequestedAreaManager() {
+        const params = new URLSearchParams(location.hash.slice(1));
+        params.delete(AREA_MANAGER_PARAM);
+
+        const remainingHash = params.toString();
+        const cleanUrl =
+            location.pathname +
+            location.search +
+            (remainingHash ? `#${remainingHash}` : '');
+
+        history.replaceState(history.state, '', cleanUrl);
+    }
+
+    function findAreaManagerOption(areaManager) {
+        const exact = getOptionByLabel(areaManager);
+        if (exact) return exact;
+
+        const wanted = normalize(areaManager);
+        const partialMatches = getOptions().filter(option => {
+            const label = normalize(option.label);
+            if (!label) return false;
+            return label.includes(wanted) || wanted.includes(label);
+        });
+
+        return partialMatches.length === 1 ? partialMatches[0] : null;
     }
 
     function setStatus(message, color = '#444') {
@@ -276,6 +314,47 @@
             restoring = false;
 
         }, RESTORE_DELAY_MS);
+    }
+
+    function applyRequestedAreaManager() {
+        const areaManager = getRequestedAreaManager();
+
+        if (!areaManager) return false;
+        if (handoffTimer !== null) return true;
+
+        let attempts = 0;
+
+        function attemptSelection() {
+            handoffTimer = null;
+            attempts++;
+
+            const requested = getRequestedAreaManager();
+            if (!requested) return;
+
+            const option = findAreaManagerOption(requested);
+
+            if (option && applyUser(option.value, option.label, true)) {
+                clearRequestedAreaManager();
+                return;
+            }
+
+            if (attempts < HANDOFF_MAX_ATTEMPTS) {
+                setStatus(`Selecting Area Manager: ${requested}`);
+                handoffTimer = window.setTimeout(
+                    attemptSelection,
+                    HANDOFF_RETRY_MS
+                );
+                return;
+            }
+
+            setStatus(
+                `Area Manager not found: ${requested}`,
+                'red'
+            );
+        }
+
+        attemptSelection();
+        return true;
     }
 
     function preventPasswordManager(input) {
@@ -786,7 +865,9 @@
                 clearInterval(initTimer);
                 initTimer = null;
 
-                restoreLastSelectedUser();
+                if (!applyRequestedAreaManager()) {
+                    restoreLastSelectedUser();
+                }
             }
 
             if (
