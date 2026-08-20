@@ -1,0 +1,30 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+
+# Logs, backups, and temporary editor files
+*.log
+*.tmp
+*.bak
+*.backup
+*.orig
+*.swp
+*~
+*.sql
+*.dump
+*.sqlite
+*.sqlite3
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Editor metadata
+.idea/
+.vscode/

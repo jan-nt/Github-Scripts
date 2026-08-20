@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Custom Icons
 // @namespace    https://nidushan.com
-// @version      2.3
+// @version      2.4
 // @description  Custom tab titles and persistent favicons for PassPay and PayManager pages
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -50,10 +50,28 @@
             emoji: '🚗'
         },
         {
+            host: 'betaling.passpay.no',
+            pathRegex: /^\/bookings(\/|$)/,
+            title: 'Booking',
+            emoji: '📅'
+        },
+        {
+            host: 'betaling.passpay.no',
+            pathRegex: /^\/payments(\/|$)/,
+            title: 'Payments',
+            emoji: '💳'
+        },
+        {
+            host: 'betaling.passpay.no',
+            pathRegex: /^\/site-administration(\/|$)/,
+            title: 'Site-Admin',
+            emoji: '🛠️'
+        },
+        {
             host: 'paymanager.logos.dk',
             pathRegex: /^\/transactions(\/|$)/,
             title: 'Transactions',
-            emoji: '💳'
+            emoji: '🧾'
         },
         {
             host: 'paymanager.logos.dk',
@@ -66,6 +84,19 @@
             pathRegex: /^\/parking(\/|$)/,
             title: 'Parking',
             emoji: '🅿️'
+        },
+        {
+            host: 'paymanager.logos.dk',
+            pathRegex: /^\/files(\/|$)/,
+            title: 'Files',
+            emoji: '📂'
+        }
+        ,
+        {
+            host: 'paymanager.logos.dk',
+            pathRegex: /^\/user_administration(\/|$)/,
+            title: 'User-Admin',
+            emoji: '🛡️'
         }
     ];
 

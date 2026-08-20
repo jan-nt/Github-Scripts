@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Search Admin Panel
 // @namespace    https://nidushan.com
-// @version      7.1
+// @version      7.3
 // @description  Displays parking details with copy, screenshot, Chain ID, and PayManager handoff tools
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -10,7 +10,7 @@
 // @match        https://betaling.parkpay.no/*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PassPay%20Search%20Admin%20Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PassPay%20Search%20Admin%20Panel.user.js
-// @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
+// @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js#sha256-6H5VB5QyLldKH9oMFUmjxw2uWpPZETQXpCkBaDjquMs=
 // @grant        none
 // @run-at       document-start
 // @noframes
@@ -32,8 +32,12 @@
     const PAYMANAGER_PARKING_URL = 'https://paymanager.logos.dk/parking';
     const PAYMANAGER_AREA_MANAGER_PARAM = 'tmAreaManager';
     const PAYMANAGER_LICENSE_PLATE_PARAM = 'tmLicensePlate';
-    const STORAGE_KEY = 'tm-parking-data-v6-mui-location';
+    const SESSION_STORAGE_KEY = 'tm-parking-data-v7-session';
+    const LEGACY_LOCAL_STORAGE_KEYS = [
+        'tm-parking-data-v6-mui-location'
+    ];
     const STORAGE_MAX_AGE_MS = 30 * 60 * 1000;
+    const MAX_JSON_RESPONSE_CHARS = 5_000_000;
 
     const PARKING_PAGE_PATH = '/parkings';
 
@@ -60,6 +64,7 @@
     let latestData = null;
     let lastUrl = location.href;
     let retryTimer = null;
+    let storageCleanupTimer = null;
 
     /************************************************************
      * GLOBAL CSS
@@ -826,7 +831,13 @@
     }
 
     function processResponse(text) {
-        if (!text || typeof text !== 'string') return;
+        if (
+            !text ||
+            typeof text !== 'string' ||
+            text.length > MAX_JSON_RESPONSE_CHARS
+        ) {
+            return;
+        }
 
         try {
             const data = JSON.parse(text);
@@ -839,11 +850,7 @@
             parsed.savedAt = Date.now();
             latestData = parsed;
 
-            try {
-                localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-            } catch {
-                // In-memory data remains available when storage is blocked.
-            }
+            storeParkingData(parsed);
 
             if (isParkingPage()) {
                 setTimeout(retryInject, 300);
@@ -970,6 +977,18 @@
      * NETWORK HOOKS
      ************************************************************/
 
+    function shouldInspectNetworkResponse(contentType) {
+        if (!isParkingPage()) return false;
+
+        const normalizedType = String(contentType || '').toLowerCase();
+
+        return (
+            !normalizedType ||
+            normalizedType.includes('/json') ||
+            normalizedType.includes('+json')
+        );
+    }
+
     function hookFetch() {
         const originalFetch = window.fetch;
 
@@ -977,7 +996,11 @@
             const response = await originalFetch.apply(this, args);
 
             try {
-                response.clone().text().then(processResponse).catch(() => {});
+                const contentType = response.headers.get('content-type');
+
+                if (shouldInspectNetworkResponse(contentType)) {
+                    response.clone().text().then(processResponse).catch(() => {});
+                }
             } catch {
                 // Ignore responses that cannot be cloned.
             }
@@ -993,7 +1016,11 @@
         XMLHttpRequest.prototype.open = function (...args) {
             this.addEventListener('load', function () {
                 try {
-                    processResponse(this.responseText);
+                    const contentType = this.getResponseHeader('content-type');
+
+                    if (shouldInspectNetworkResponse(contentType)) {
+                        processResponse(this.responseText);
+                    }
                 } catch {
                     // Ignore non-text responses.
                 }
@@ -1008,21 +1035,106 @@
      * INJECTION RETRY LOGIC
      ************************************************************/
 
+    function clearParkingData() {
+        latestData = null;
+
+        try {
+            sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        } catch {
+            // Ignore unavailable session storage.
+        }
+
+        document.getElementById('tm-parking-info')?.remove();
+    }
+
+    function scheduleParkingDataCleanup(savedAt) {
+        if (storageCleanupTimer !== null) {
+            clearTimeout(storageCleanupTimer);
+        }
+
+        const remaining = Math.max(
+            0,
+            savedAt + STORAGE_MAX_AGE_MS - Date.now()
+        );
+
+        storageCleanupTimer = window.setTimeout(() => {
+            storageCleanupTimer = null;
+
+            if (Date.now() - savedAt >= STORAGE_MAX_AGE_MS) {
+                clearParkingData();
+            } else {
+                scheduleParkingDataCleanup(savedAt);
+            }
+        }, remaining);
+    }
+
+    function storeParkingData(data) {
+        scheduleParkingDataCleanup(data.savedAt);
+
+        try {
+            sessionStorage.setItem(
+                SESSION_STORAGE_KEY,
+                JSON.stringify(data)
+            );
+        } catch {
+            // In-memory data remains available when storage is blocked.
+        }
+    }
+
+    function migrateLegacyParkingData() {
+        try {
+            const hasSessionData = sessionStorage.getItem(SESSION_STORAGE_KEY);
+
+            LEGACY_LOCAL_STORAGE_KEYS.forEach(key => {
+                const raw = localStorage.getItem(key);
+
+                if (raw && !hasSessionData) {
+                    try {
+                        const data = JSON.parse(raw);
+
+                        if (
+                            data &&
+                            Number.isFinite(data.savedAt) &&
+                            Date.now() - data.savedAt <= STORAGE_MAX_AGE_MS
+                        ) {
+                            sessionStorage.setItem(
+                                SESSION_STORAGE_KEY,
+                                JSON.stringify(data)
+                            );
+                        }
+                    } catch {
+                        // Discard malformed legacy data below.
+                    }
+                }
+
+                localStorage.removeItem(key);
+            });
+        } catch {
+            // Ignore unavailable browser storage.
+        }
+    }
+
     function getStoredData() {
         try {
-            const data = JSON.parse(localStorage.getItem(STORAGE_KEY));
+            const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+
+            if (!raw) return null;
+
+            const data = JSON.parse(raw);
 
             if (
                 !data ||
                 !Number.isFinite(data.savedAt) ||
                 Date.now() - data.savedAt > STORAGE_MAX_AGE_MS
             ) {
-                localStorage.removeItem(STORAGE_KEY);
+                clearParkingData();
                 return null;
             }
 
+            scheduleParkingDataCleanup(data.savedAt);
             return data;
         } catch {
+            clearParkingData();
             return null;
         }
     }
@@ -1072,7 +1184,10 @@
      ************************************************************/
 
     function isParkingPage() {
-        return location.pathname.includes(PARKING_PAGE_PATH);
+        return (
+            location.pathname === PARKING_PAGE_PATH ||
+            location.pathname.startsWith(`${PARKING_PAGE_PATH}/`)
+        );
     }
 
     function handleNavigationChange() {
@@ -1105,6 +1220,8 @@
         }
     }
 
+    migrateLegacyParkingData();
+    getStoredData();
     injectStyles();
     hookFetch();
     hookXMLHttpRequest();

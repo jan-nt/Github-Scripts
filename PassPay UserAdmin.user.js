@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      1.8
+// @version      1.9
 // @description  Converts ChainID and PaymentID values into clickable links and adds smart search helpers
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -141,12 +141,12 @@
 
         const trimmed = value.trim();
 
-        // Phone: 951 05 712
+        // Norwegian phone format: three digits, two digits, three digits
         if (/^\d{3}\s+\d{2}\s+\d{3}$/.test(trimmed)) {
             return trimmed.replace(/\s+/g, '');
         }
 
-        // Plate: DP 74369
+        // Plate format: two letters followed by four or five digits
         if (/^[A-Za-z]{2}\s+\d{4,5}$/.test(trimmed)) {
             return trimmed.replace(/\s+/g, '');
         }

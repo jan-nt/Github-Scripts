@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.5
+// @version      2.6
 // @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -289,13 +289,12 @@
         ].forEach(event => select.dispatchEvent(event));
     }
 
-    function saveSelectedUser(value, label) {
+    function saveSelectedUser(value) {
         try {
             localStorage.setItem(
                 STORAGE_KEY,
                 JSON.stringify({
                     value,
-                    label,
                     savedAt: Date.now()
                 })
             );
@@ -310,6 +309,7 @@
 
             if (
                 !saved ||
+                !String(saved.value || '').trim() ||
                 !Number.isFinite(saved.savedAt) ||
                 Date.now() - saved.savedAt > STORAGE_MAX_AGE_MS
             ) {
@@ -317,7 +317,19 @@
                 return null;
             }
 
-            return saved;
+            const sanitized = {
+                value: String(saved.value || ''),
+                savedAt: saved.savedAt
+            };
+
+            if (Object.prototype.hasOwnProperty.call(saved, 'label')) {
+                localStorage.setItem(
+                    STORAGE_KEY,
+                    JSON.stringify(sanitized)
+                );
+            }
+
+            return sanitized;
         } catch {
             return null;
         }
@@ -364,10 +376,7 @@
         }
 
         if (shouldSave) {
-            saveSelectedUser(
-                option.value,
-                option.label
-            );
+            saveSelectedUser(option.value);
         }
 
         setStatus(
@@ -404,8 +413,8 @@
 
             if (optionExists) {
                 applyUser(
-                    saved.value,
-                    saved.label,
+                    optionExists.value,
+                    optionExists.label,
                     false
                 );
             }

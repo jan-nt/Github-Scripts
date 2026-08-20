@@ -1,6 +1,12 @@
 # GitHub Scripts
 
-Tampermonkey userscripts for PassPay, PayManager, DIBS, and Riverty workflows.
+Tampermonkey userscripts for authorized PassPay, PayManager, DIBS, and Riverty workflows. These scripts customize existing pages; they do not provide access to any service.
+
+## Requirements
+
+- A current Chrome or Chromium-based browser with Tampermonkey installed.
+- An authorized account for each service used by a script.
+- Both PassPay Search Admin Panel and PayManager Parking User Selector for the Area Manager and license-plate handoff.
 
 ## Install
 
@@ -12,18 +18,51 @@ Tampermonkey userscripts for PassPay, PayManager, DIBS, and Riverty workflows.
 - [PayManager Image Row Highlighter](https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Image%20Row%20Highlighter.user.js)
 - [PayManager Parking User Selector](https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Parking%20User%20Selector.user.js)
 
-Open a link in a browser with Tampermonkey installed and confirm the installation. Each script includes `@updateURL` and `@downloadURL` metadata for automatic updates.
+Open a link in a browser with Tampermonkey installed and confirm the installation. Each script includes `@updateURL` and `@downloadURL` metadata for automatic updates. Tampermonkey only installs a repository change after that script's `@version` value is increased.
 
 ## Privacy and security
 
-- No credentials, API keys, access tokens, or private keys are included.
+- No credentials, API keys, access tokens, or private keys are read from project configuration or included in this repository.
 - The session keeper clicks existing login buttons but does not read or store credentials.
-- Extracted parking data is stored only in the site browser storage and expires after 30 minutes.
-- Area Manager and license plate handoffs use the URL fragment, which is not sent to the PayManager server.
-- Install both PassPay Search Admin Panel and PayManager Parking User Selector to enable automatic Area Manager selection.
-- The last selected PayManager parking user is stored only in the site browser storage and expires after 30 days.
-- The parking extractor loads html2canvas 1.4.1 from jsDelivr for local screenshot creation.
+- Extracted license plates and parking details are stored only in the current PassPay/ParkPay tab's session storage. They are removed after 30 minutes and are also discarded when that tab's browser session ends. Version 7.3 removes the older persistent cache after migrating any still-valid entry.
+- Area Manager and license-plate handoffs use a URL fragment. Fragments are not included in HTTP requests, and the receiving script removes its handoff parameters after use. Page scripts and browser extensions can still read a fragment while it is present.
+- Chain IDs and payment IDs opened in another portal are placed in that portal's query string and can appear in browser history and service logs.
+- Only the identifier for the last selected PayManager parking user is stored in PayManager's local browser storage. The display label is derived from the page instead of being persisted. The script treats the identifier as expired after 30 days and removes it the next time it checks the stored value.
+- PassPay Search Admin Panel loads the version-pinned html2canvas 1.4.1 file from jsDelivr for local screenshot creation and verifies it with a SHA-256 integrity hash.
+- Copy and screenshot actions intentionally place displayed customer data on the clipboard or in the browser's download folder. Handle those outputs according to company policy.
+- The scripts run inside authenticated pages and can read data displayed by those pages. Install only reviewed versions from this repository.
+
+## Known limitations
+
+- Several workflows depend on the sites' current URLs, labels, and DOM structure. Site updates can require corresponding userscript updates.
+- Chrome may throttle timers in background tabs, so the five-minute session-keeper check can run later than scheduled.
+- The login recovery feature clicks an existing login button; it cannot supply credentials, complete MFA, or recover from an expired identity-provider session.
+- There are no automated browser integration tests because the target pages require authorized accounts.
+
+## Development checks
+
+The repository has no build step or third-party development dependencies. Run the same checks used by CI with Node.js:
+
+```powershell
+Get-ChildItem -Filter '*.user.js' | ForEach-Object { node --check -- $_.FullName }
+node scripts/validate-userscripts.mjs
+```
+
+Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
+
+## Release notes
+
+- Increase the changed script's `@version` before publishing it.
+- Require the `Validate userscripts` workflow check in the `main` branch protection ruleset.
+- Review and test changes on the matching site before updating `main`; installed copies can receive changes from `main` automatically.
+- Do not add credentials, exported customer data, screenshots, logs, or real personal-data examples to the repository.
+
+## License
+
+No license file is currently included. The repository owner must choose and add an approved license before granting reuse or redistribution rights.
 
 ## Support
 
 [jas@nortronic.com](mailto:jas@nortronic.com)
+
+Sensitive reports should follow the [security policy](.github/SECURITY.md) and must not include live credentials or customer data.
