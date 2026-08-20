@@ -38,3 +38,8 @@ jobs:
 
       - name: Validate userscript policy
         run: node scripts/validate-userscripts.mjs --verify-remote
+
+      - name: Test userscript behavior
+        run: |
+          node scripts/test-search-input-normalizer.mjs
+          node scripts/test-paymanager-parking-handoff.mjs

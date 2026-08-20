@@ -17,6 +17,7 @@ Tampermonkey userscripts for authorized PassPay, PayManager, DIBS, and Riverty w
 - [PayManager Column Controller](https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Column%20Controller.user.js)
 - [PayManager Image Row Highlighter](https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Image%20Row%20Highlighter.user.js)
 - [PayManager Parking User Selector](https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Parking%20User%20Selector.user.js)
+- [PayManager Search Input Normalizer](https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/PayManager%20Search%20Input%20Normalizer.user.js)
 
 Open a link in a browser with Tampermonkey installed and confirm the installation. Each script includes `@updateURL` and `@downloadURL` metadata for automatic updates. Tampermonkey only installs a repository change after that script's `@version` value is increased.
 
@@ -46,6 +47,8 @@ The repository has no build step or third-party development dependencies. Run th
 ```powershell
 Get-ChildItem -Filter '*.user.js' | ForEach-Object { node --check -- $_.FullName }
 node scripts/validate-userscripts.mjs
+node scripts/test-search-input-normalizer.mjs
+node scripts/test-paymanager-parking-handoff.mjs
 ```
 
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
