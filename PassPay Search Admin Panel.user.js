@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Search Admin Panel
 // @namespace    https://nidushan.com
-// @version      7.3
+// @version      7.4
 // @description  Displays parking details with copy, screenshot, Chain ID, and PayManager handoff tools
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -384,7 +384,10 @@
         return String(value || '')
             .trim()
             .toUpperCase()
-            .replace(/\s+/g, '');
+            .replace(
+                /[\s\u00A0\u2007\u202F\u2010-\u2015\u2212\uFE58\uFE63\uFF0D-]+/g,
+                ''
+            );
     }
 
     function getVisiblePlateFromPage() {
@@ -810,9 +813,14 @@
 
         const visiblePlate = getVisiblePlateFromPage();
         const commonPlate = getMostCommonPlate(allParkings);
+        const visiblePlateExistsInResponse =
+            visiblePlate &&
+            allParkings.some(parking => {
+                return normalizePlate(parking.licensePlate) === visiblePlate;
+            });
 
         const selectedPlate =
-            visiblePlate ||
+            (visiblePlateExistsInResponse ? visiblePlate : '') ||
             commonPlate ||
             normalizePlate(allParkings[0].licensePlate);
 
@@ -1038,6 +1046,16 @@
     function clearParkingData() {
         latestData = null;
 
+        if (retryTimer !== null) {
+            clearInterval(retryTimer);
+            retryTimer = null;
+        }
+
+        if (storageCleanupTimer !== null) {
+            clearTimeout(storageCleanupTimer);
+            storageCleanupTimer = null;
+        }
+
         try {
             sessionStorage.removeItem(SESSION_STORAGE_KEY);
         } catch {
@@ -1140,11 +1158,18 @@
     }
 
     function retryInject() {
+        if (!isParkingPage()) return;
         if (retryTimer !== null) return;
 
         let attempts = 0;
 
         retryTimer = setInterval(() => {
+            if (!isParkingPage()) {
+                clearInterval(retryTimer);
+                retryTimer = null;
+                return;
+            }
+
             attempts++;
 
             const data = latestData || getStoredData();
@@ -1197,7 +1222,26 @@
 
         if (isParkingPage()) {
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
+        } else {
+            clearParkingData();
         }
+    }
+
+    function hookHistoryNavigation() {
+        ['pushState', 'replaceState'].forEach(methodName => {
+            const originalMethod = history[methodName];
+
+            if (typeof originalMethod !== 'function') return;
+
+            history[methodName] = function (...args) {
+                const result = originalMethod.apply(this, args);
+                queueMicrotask(handleNavigationChange);
+                return result;
+            };
+        });
+
+        window.addEventListener('popstate', handleNavigationChange);
+        window.addEventListener('hashchange', handleNavigationChange);
     }
 
     function startNavigationObserver() {
@@ -1217,6 +1261,8 @@
     function start() {
         if (isParkingPage()) {
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
+        } else {
+            clearParkingData();
         }
     }
 
@@ -1225,6 +1271,7 @@
     injectStyles();
     hookFetch();
     hookXMLHttpRequest();
+    hookHistoryNavigation();
     startNavigationObserver();
     
 

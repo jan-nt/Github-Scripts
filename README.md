@@ -49,6 +49,7 @@ Get-ChildItem -Filter '*.user.js' | ForEach-Object { node --check -- $_.FullName
 node scripts/validate-userscripts.mjs
 node scripts/test-search-input-normalizer.mjs
 node scripts/test-paymanager-parking-handoff.mjs
+node scripts/test-passpay-search-admin-panel.mjs
 ```
 
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.

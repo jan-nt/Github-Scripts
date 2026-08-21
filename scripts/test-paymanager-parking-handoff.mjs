@@ -25,12 +25,15 @@ const xpaths = {
     entries:
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[6]',
     pending:
-        '/html/body/div[2]/div[2]/div/div[2]/div[2]/div[3]/fieldset/div/div[2]/a'
+        '/html/body/div[2]/div[2]/div/div[2]/div[2]/div[3]/fieldset/div/div[2]/a',
+    active:
+        '/html/body/div[2]/div[2]/div/div[2]/div[2]/div[3]/fieldset/div/div[1]/a'
 };
 
-function createHandoffScenario() {
+function createHandoffScenario(initialStatus = 'active') {
     let clock = 0;
     let cleanUrl = '';
+    let activeClicks = 0;
     let pendingClicks = 0;
     const timers = [];
     const storage = new Map();
@@ -75,12 +78,37 @@ function createHandoffScenario() {
 
     const input = new FakeInput();
     const entriesInfo = {
-        textContent: 'Showing 0 to 0 of 0 entries'
+        textContent: ' 0 0 (38)'
+    };
+    const activeClasses = new Set(
+        initialStatus === 'active' ? ['active_tab'] : []
+    );
+    const pendingClasses = new Set(
+        initialStatus === 'pending' ? ['active_tab'] : []
+    );
+    const activeButton = {
+        classList: {
+            contains(value) {
+                return activeClasses.has(value);
+            }
+        },
+        click() {
+            activeClicks++;
+            activeClasses.add('active_tab');
+            pendingClasses.delete('active_tab');
+        }
     };
     const pendingButton = {
+        classList: {
+            contains(value) {
+                return pendingClasses.has(value);
+            }
+        },
         click() {
             pendingClicks++;
-            entriesInfo.textContent = 'Showing 1 to 1 of 1 entries';
+            pendingClasses.add('active_tab');
+            activeClasses.delete('active_tab');
+            entriesInfo.textContent = ' 1 1 (38)';
         }
     };
     const option = {
@@ -107,13 +135,16 @@ function createHandoffScenario() {
         getElementById(id) {
             if (id === 'prs_select_user') return select;
             if (id === 'tm-prs-search-status') return status;
+            if (id === 'parkings_active_btn') return activeButton;
+            if (id === 'parkings_pending_btn') return pendingButton;
             return null;
         },
         evaluate(xpath) {
             const elements = new Map([
                 [xpaths.input, input],
                 [xpaths.entries, entriesInfo],
-                [xpaths.pending, pendingButton]
+                [xpaths.pending, pendingButton],
+                [xpaths.active, activeButton]
             ]);
 
             return { singleNodeValue: elements.get(xpath) || null };
@@ -178,6 +209,7 @@ function createHandoffScenario() {
         select,
         status,
         getCleanUrl: () => cleanUrl,
+        getActiveClicks: () => activeClicks,
         getPendingClicks: () => pendingClicks,
         getDispatchedEvents: () => dispatchedEvents,
         runTimers
@@ -191,6 +223,7 @@ scenario.runTimers();
 
 assert.equal(scenario.input.value, 'EV67016');
 assert.equal(scenario.input.focused, true);
+assert.equal(scenario.getActiveClicks(), 0);
 assert.equal(scenario.getPendingClicks(), 1);
 assert.deepEqual(scenario.select.dispatchedEvents, []);
 assert.deepEqual(scenario.getDispatchedEvents(), [
@@ -206,13 +239,26 @@ assert.deepEqual(scenario.getDispatchedEvents(), [
 assert.equal(scenario.getCleanUrl(), '/parking');
 assert.equal(scenario.status.textContent, 'Ready: EV67016');
 
+const pendingFirstScenario = createHandoffScenario('pending');
+
+assert.equal(pendingFirstScenario.api.applyRequestedHandoff(), true);
+pendingFirstScenario.runTimers();
+
+assert.equal(pendingFirstScenario.getActiveClicks(), 1);
+assert.equal(pendingFirstScenario.getPendingClicks(), 1);
+assert.equal(pendingFirstScenario.input.value, 'EV67016');
+assert.equal(pendingFirstScenario.status.textContent, 'Ready: EV67016');
+
 assert.equal(
     scenario.api.isEmptyEntriesText('Showing 0 to 0 of 0 entries'),
     true
 );
+assert.equal(scenario.api.isEmptyEntriesText('0 0'), true);
+assert.equal(scenario.api.isEmptyEntriesText('0 0 (38)'), true);
 assert.equal(
     scenario.api.isEntriesSummaryText('Showing 1 to 3 of 3 entries'),
     true
 );
+assert.equal(scenario.api.isEntriesSummaryText('1 1'), true);
 
 console.log('PayManager parking handoff tests passed.');

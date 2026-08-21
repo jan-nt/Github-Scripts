@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.7
+// @version      2.8
 // @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -50,6 +50,10 @@
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[4]/label/form/input';
     const PARKING_ENTRIES_INFO_XPATH =
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[6]';
+    const ACTIVE_STATUS_BUTTON_ID = 'parkings_active_btn';
+    const PENDING_STATUS_BUTTON_ID = 'parkings_pending_btn';
+    const ACTIVE_STATUS_XPATH =
+        '/html/body/div[2]/div[2]/div/div[2]/div[2]/div[3]/fieldset/div/div[1]/a';
     const PENDING_STATUS_XPATH =
         '/html/body/div[2]/div[2]/div/div[2]/div[2]/div[3]/fieldset/div/div[2]/a';
 
@@ -254,25 +258,48 @@
     }
 
     function getPendingStatusButton() {
-        return getElementByXPath(PENDING_STATUS_XPATH);
+        return document.getElementById(PENDING_STATUS_BUTTON_ID) ||
+            getElementByXPath(PENDING_STATUS_XPATH);
+    }
+
+    function getActiveStatusButton() {
+        return document.getElementById(ACTIVE_STATUS_BUTTON_ID) ||
+            getElementByXPath(ACTIVE_STATUS_XPATH);
+    }
+
+    function isParkingStatusSelected(button) {
+        return Boolean(button?.classList?.contains('active_tab'));
     }
 
     function normalizeEntriesText(value) {
         return String(value || '').replace(/\s+/g, ' ').trim();
     }
 
+    function getLeadingEntryCounts(value) {
+        const numbers = normalizeEntriesText(value).match(/\d+/g) || [];
+
+        if (numbers.length < 2) return null;
+
+        return {
+            first: Number(numbers[0]),
+            second: Number(numbers[1])
+        };
+    }
+
     function isEmptyEntriesText(value) {
         const text = normalizeEntriesText(value);
+        const counts = getLeadingEntryCounts(text);
 
-        return /\b0\s+to\s+0\b/i.test(text) &&
-            /\bentr(?:y|ies)\b/i.test(text);
+        return /\b0\s+(?:to|of)\s+0\b/i.test(text) ||
+            Boolean(counts && counts.first === 0 && counts.second === 0);
     }
 
     function isEntriesSummaryText(value) {
         const text = normalizeEntriesText(value);
+        const counts = getLeadingEntryCounts(text);
 
-        return /\b\d+\s+to\s+\d+\b/i.test(text) &&
-            /\bentr(?:y|ies)\b/i.test(text);
+        return /\b\d+\s+(?:to|of)\s+\d+\b/i.test(text) ||
+            Boolean(counts);
     }
 
     function setParkingSearchValue(input, licensePlate) {
@@ -506,7 +533,8 @@
         let lastPlateInput = null;
         let plateSearchDispatched = false;
         let plateSearchDispatchedAt = 0;
-        let pendingStatusClickedAt = 0;
+        let parkingStatusClickedAt = 0;
+        let parkingStatusClickRequested = false;
         let pendingStatusAttempted =
             wasPendingStatusAttempted(initialHandoff);
         let lastEntriesText = '';
@@ -565,6 +593,37 @@
             setStatus(`Searching for plate: ${licensePlate}`);
         }
 
+        function ensureRequestedParkingStatus(handoff) {
+            pendingStatusAttempted =
+                pendingStatusAttempted ||
+                wasPendingStatusAttempted(handoff);
+
+            const wantsPending = pendingStatusAttempted;
+            const button = wantsPending
+                ? getPendingStatusButton()
+                : getActiveStatusButton();
+            const statusName = wantsPending ? 'Pending' : 'Active';
+
+            if (!button) {
+                failureMessage = `${statusName} parking status was not found`;
+                return false;
+            }
+
+            if (isParkingStatusSelected(button)) return true;
+
+            if (!parkingStatusClickRequested) {
+                parkingStatusClickRequested = true;
+                parkingStatusClickedAt = Date.now();
+                plateSearchDispatched = false;
+                lastPlateInput = null;
+                resetResultChecks();
+                setStatus(`Switching to ${statusName}...`);
+                button.click();
+            }
+
+            return false;
+        }
+
         function handleStableEntriesResult(handoff, input, entriesText) {
             if (isEmptyEntriesText(entriesText)) {
                 pendingStatusAttempted =
@@ -572,21 +631,14 @@
                     wasPendingStatusAttempted(handoff);
 
                 if (!pendingStatusAttempted) {
-                    const pendingButton = getPendingStatusButton();
-
-                    if (!pendingButton) {
-                        failureMessage = 'Pending parking status was not found';
-                        return false;
-                    }
-
                     markPendingStatusAttempted(handoff);
                     pendingStatusAttempted = true;
-                    pendingStatusClickedAt = Date.now();
+                    parkingStatusClickedAt = 0;
+                    parkingStatusClickRequested = false;
                     plateSearchDispatched = false;
                     lastPlateInput = null;
                     resetResultChecks();
                     setStatus('No active entries. Switching to Pending...');
-                    pendingButton.click();
                     return false;
                 }
 
@@ -628,11 +680,14 @@
             const areaManagerSettled =
                 areaManagerApplied &&
                 Date.now() - areaManagerAppliedAt >= HANDOFF_AREA_SETTLE_MS;
-            const pendingStatusSettled =
-                !pendingStatusClickedAt ||
-                Date.now() - pendingStatusClickedAt >= HANDOFF_PENDING_SETTLE_MS;
+            const parkingStatusReady =
+                areaManagerSettled &&
+                ensureRequestedParkingStatus(handoff);
+            const parkingStatusSettled =
+                !parkingStatusClickedAt ||
+                Date.now() - parkingStatusClickedAt >= HANDOFF_PENDING_SETTLE_MS;
 
-            if (areaManagerSettled && pendingStatusSettled) {
+            if (parkingStatusReady && parkingStatusSettled) {
                 const input = getParkingSearchInput();
 
                 if (input) {
