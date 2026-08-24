@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Search Admin Panel
 // @namespace    https://nidushan.com
-// @version      7.5
+// @version      7.6
 // @description  Displays parking details with copy, screenshot, Chain ID, and PayManager handoff tools
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -43,6 +43,7 @@
     const MAX_AUTO_RELOADS = 1;
     const MAX_JSON_RESPONSE_CHARS = 5_000_000;
 
+    const SEARCH_PAGE_PATH = '/search';
     const PARKING_PAGE_PATH = '/parkings';
 
     const INFO_BOX_TARGET_XPATH =
@@ -57,8 +58,9 @@
     const VISIBLE_PLATE_XPATH =
         '/html/body/div[1]/div/div/div/div/div[2]/div[1]/div/div[1]/div[1]/span[2]';
 
-    const INITIAL_INJECT_DELAY_MS = 2000;
-    const RETRY_INTERVAL_MS = 1000;
+    const INITIAL_INJECT_DELAY_MS = 100;
+    const RETRY_INTERVAL_MS = 250;
+    const AUTO_RECOVERY_TRIGGER_ATTEMPT = 16;
     const MAX_RETRY_ATTEMPTS = 30;
 
     /************************************************************
@@ -991,28 +993,20 @@
      * NETWORK HOOKS
      ************************************************************/
 
-    function shouldInspectNetworkResponse(contentType) {
-        if (!isParkingPage()) return false;
-
-        const normalizedType = String(contentType || '').toLowerCase();
-
-        return (
-            !normalizedType ||
-            normalizedType.includes('/json') ||
-            normalizedType.includes('+json')
-        );
+    function shouldInspectNetworkResponse(requestStartedInWorkflow) {
+        return requestStartedInWorkflow && isParkingSearchWorkflowPage();
     }
 
     function hookFetch() {
         const originalFetch = window.fetch;
 
         window.fetch = async function (...args) {
+            const requestStartedInWorkflow =
+                isParkingSearchWorkflowPage();
             const response = await originalFetch.apply(this, args);
 
             try {
-                const contentType = response.headers.get('content-type');
-
-                if (shouldInspectNetworkResponse(contentType)) {
+                if (shouldInspectNetworkResponse(requestStartedInWorkflow)) {
                     response.clone().text().then(processResponse).catch(() => {});
                 }
             } catch {
@@ -1028,11 +1022,12 @@
         const originalOpen = XMLHttpRequest.prototype.open;
 
         XMLHttpRequest.prototype.open = function (...args) {
+            const requestStartedInWorkflow =
+                isParkingSearchWorkflowPage();
+
             this.addEventListener('load', function () {
                 try {
-                    const contentType = this.getResponseHeader('content-type');
-
-                    if (shouldInspectNetworkResponse(contentType)) {
+                    if (shouldInspectNetworkResponse(requestStartedInWorkflow)) {
                         processResponse(this.responseText);
                     }
                 } catch {
@@ -1311,7 +1306,7 @@
                     return;
                 }
             } else {
-                if (attempts === 3) {
+                if (attempts === AUTO_RECOVERY_TRIGGER_ATTEMPT) {
                     const recoveryResult = scheduleAutoRecoveryReload();
 
                     if (
@@ -1352,6 +1347,17 @@
             location.pathname === PARKING_PAGE_PATH ||
             location.pathname.startsWith(`${PARKING_PAGE_PATH}/`)
         );
+    }
+
+    function isSearchPage() {
+        return (
+            location.pathname === SEARCH_PAGE_PATH ||
+            location.pathname.startsWith(`${SEARCH_PAGE_PATH}/`)
+        );
+    }
+
+    function isParkingSearchWorkflowPage() {
+        return isSearchPage() || isParkingPage();
     }
 
     function handleNavigationChange() {

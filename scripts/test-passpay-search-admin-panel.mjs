@@ -17,7 +17,11 @@ const testSource = `${source.slice(0, startupIndex)}
     globalThis.__adminPanelTest = {
         buildParkingDataFromResponse,
         handleNavigationChange,
+        hookFetch,
+        hookXMLHttpRequest,
+        isParkingSearchWorkflowPage,
         scheduleAutoRecoveryReload,
+        shouldInspectNetworkResponse,
         setLatestData(value) {
             latestData = value;
         },
@@ -32,6 +36,7 @@ function createScenario() {
     let removedPanel = false;
     let reloadCount = 0;
     let nextTimerId = 1;
+    let pendingFetchResolve = null;
     const storage = new Map();
     const timers = new Map();
     const location = {
@@ -66,9 +71,41 @@ function createScenario() {
         }
     };
 
+    const window = {
+        fetch() {
+            return new Promise(resolve => {
+                pendingFetchResolve = resolve;
+            });
+        },
+        setTimeout(callback) {
+            const id = nextTimerId++;
+            timers.set(id, callback);
+            return id;
+        }
+    };
+
+    class FakeXMLHttpRequest {
+        constructor() {
+            this.listeners = new Map();
+            this.responseText = '';
+        }
+
+        addEventListener(type, listener) {
+            this.listeners.set(type, listener);
+        }
+
+        open() {}
+
+        complete(text) {
+            this.responseText = text;
+            this.listeners.get('load')?.call(this);
+        }
+    }
+
     const context = {
         URL,
         URLSearchParams,
+        XMLHttpRequest: FakeXMLHttpRequest,
         XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
         document,
         location,
@@ -88,13 +125,7 @@ function createScenario() {
             timers.delete(id);
         },
         setTimeout() {},
-        window: {
-            setTimeout(callback) {
-                const id = nextTimerId++;
-                timers.set(id, callback);
-                return id;
-            }
-        }
+        window
     };
 
     vm.runInNewContext(testSource, context);
@@ -107,6 +138,40 @@ function createScenario() {
         },
         wasPanelRemoved: () => removedPanel,
         getReloadCount: () => reloadCount,
+        async captureFetchAcrossNavigation(data) {
+            context.__adminPanelTest.hookFetch();
+            location.href = 'https://betaling.passpay.no/search';
+            location.pathname = '/search';
+
+            const request = window.fetch('/parking-search');
+
+            location.href = 'https://betaling.passpay.no/parkings';
+            location.pathname = '/parkings';
+
+            pendingFetchResolve({
+                clone() {
+                    return {
+                        text: async () => JSON.stringify(data)
+                    };
+                }
+            });
+
+            await request;
+            await Promise.resolve();
+            await Promise.resolve();
+        },
+        captureXhrAcrossNavigation(data) {
+            context.__adminPanelTest.hookXMLHttpRequest();
+            location.href = 'https://betaling.passpay.no/search';
+            location.pathname = '/search';
+
+            const request = new FakeXMLHttpRequest();
+            request.open('GET', '/parking-search');
+
+            location.href = 'https://betaling.passpay.no/parkings';
+            location.pathname = '/parkings';
+            request.complete(JSON.stringify(data));
+        },
         runTimers() {
             while (timers.size > 0) {
                 const [id, callback] = timers.entries().next().value;
@@ -156,6 +221,33 @@ scenario.api.handleNavigationChange();
 
 assert.equal(scenario.api.getLatestData(), null);
 assert.equal(scenario.wasPanelRemoved(), true);
+
+assert.equal(scenario.api.isParkingSearchWorkflowPage(), true);
+assert.equal(scenario.api.shouldInspectNetworkResponse(false), false);
+assert.equal(scenario.api.shouldInspectNetworkResponse(true), true);
+
+scenario.location.href = 'https://betaling.passpay.no/administration';
+scenario.location.pathname = '/administration';
+
+assert.equal(scenario.api.isParkingSearchWorkflowPage(), false);
+assert.equal(scenario.api.shouldInspectNetworkResponse(false), false);
+assert.equal(scenario.api.shouldInspectNetworkResponse(true), false);
+
+const captureScenario = createScenario();
+await captureScenario.captureFetchAcrossNavigation(newResponse);
+
+assert.equal(
+    captureScenario.api.getLatestData().licensePlate,
+    'NEW456'
+);
+
+const xhrCaptureScenario = createScenario();
+xhrCaptureScenario.captureXhrAcrossNavigation(newResponse);
+
+assert.equal(
+    xhrCaptureScenario.api.getLatestData().licensePlate,
+    'NEW456'
+);
 
 const recoveryScenario = createScenario();
 
