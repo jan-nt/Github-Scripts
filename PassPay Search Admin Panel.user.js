@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Search Admin Panel
 // @namespace    https://nidushan.com
-// @version      7.4
+// @version      7.5
 // @description  Displays parking details with copy, screenshot, Chain ID, and PayManager handoff tools
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -33,10 +33,14 @@
     const PAYMANAGER_AREA_MANAGER_PARAM = 'tmAreaManager';
     const PAYMANAGER_LICENSE_PLATE_PARAM = 'tmLicensePlate';
     const SESSION_STORAGE_KEY = 'tm-parking-data-v7-session';
+    const AUTO_RELOAD_STORAGE_KEY = 'tm-parking-auto-reload-v1';
     const LEGACY_LOCAL_STORAGE_KEYS = [
         'tm-parking-data-v6-mui-location'
     ];
     const STORAGE_MAX_AGE_MS = 30 * 60 * 1000;
+    const AUTO_RELOAD_WINDOW_MS = 2 * 60 * 1000;
+    const AUTO_RELOAD_DELAY_MS = 750;
+    const MAX_AUTO_RELOADS = 1;
     const MAX_JSON_RESPONSE_CHARS = 5_000_000;
 
     const PARKING_PAGE_PATH = '/parkings';
@@ -65,6 +69,7 @@
     let lastUrl = location.href;
     let retryTimer = null;
     let storageCleanupTimer = null;
+    let autoReloadTimer = null;
 
     /************************************************************
      * GLOBAL CSS
@@ -858,6 +863,7 @@
             parsed.savedAt = Date.now();
             latestData = parsed;
 
+            clearAutoReloadState();
             storeParkingData(parsed);
 
             if (isParkingPage()) {
@@ -1157,6 +1163,128 @@
         }
     }
 
+    function getAutoReloadPageKey() {
+        return `${location.pathname}${location.search}${location.hash}`;
+    }
+
+    function getAutoReloadState() {
+        let raw;
+
+        try {
+            raw = sessionStorage.getItem(AUTO_RELOAD_STORAGE_KEY);
+        } catch {
+            return null;
+        }
+
+        let state = null;
+
+        if (raw) {
+            try {
+                state = JSON.parse(raw);
+            } catch {
+                try {
+                    sessionStorage.removeItem(AUTO_RELOAD_STORAGE_KEY);
+                } catch {
+                    return null;
+                }
+            }
+        }
+
+        const pageKey = getAutoReloadPageKey();
+
+        if (
+            state &&
+            state.pageKey === pageKey &&
+            Number.isFinite(state.startedAt) &&
+            Date.now() - state.startedAt <= AUTO_RELOAD_WINDOW_MS &&
+            Number.isInteger(state.attempts) &&
+            state.attempts >= 0
+        ) {
+            return state;
+        }
+
+        return {
+            pageKey,
+            startedAt: Date.now(),
+            attempts: 0
+        };
+    }
+
+    function saveAutoReloadState(state) {
+        try {
+            sessionStorage.setItem(
+                AUTO_RELOAD_STORAGE_KEY,
+                JSON.stringify(state)
+            );
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    function clearAutoReloadState() {
+        if (autoReloadTimer !== null) {
+            clearTimeout(autoReloadTimer);
+            autoReloadTimer = null;
+        }
+
+        try {
+            sessionStorage.removeItem(AUTO_RELOAD_STORAGE_KEY);
+        } catch {
+            // Ignore unavailable session storage.
+        }
+    }
+
+    function scheduleAutoRecoveryReload() {
+        if (!isParkingPage() || autoReloadTimer !== null) {
+            return 'skipped';
+        }
+
+        const state = getAutoReloadState();
+
+        if (!state) {
+            return 'unavailable';
+        }
+
+        if (state.attempts >= MAX_AUTO_RELOADS) {
+            showMessageBox(
+                'Parking data still unavailable.',
+                'The page was refreshed automatically, but no matching response was captured. Run the search again.'
+            );
+            return 'exhausted';
+        }
+
+        const nextState = {
+            ...state,
+            attempts: state.attempts + 1
+        };
+
+        if (!saveAutoReloadState(nextState)) {
+            return 'unavailable';
+        }
+
+        showMessageBox(
+            'Recovering parking data...',
+            'No matching response was captured. Reloading this page once automatically.'
+        );
+
+        autoReloadTimer = window.setTimeout(() => {
+            autoReloadTimer = null;
+
+            if (
+                !isParkingPage() ||
+                latestData ||
+                getStoredData()
+            ) {
+                return;
+            }
+
+            location.reload();
+        }, AUTO_RELOAD_DELAY_MS);
+
+        return 'scheduled';
+    }
+
     function retryInject() {
         if (!isParkingPage()) return;
         if (retryTimer !== null) return;
@@ -1184,9 +1312,20 @@
                 }
             } else {
                 if (attempts === 3) {
+                    const recoveryResult = scheduleAutoRecoveryReload();
+
+                    if (
+                        recoveryResult === 'scheduled' ||
+                        recoveryResult === 'exhausted'
+                    ) {
+                        clearInterval(retryTimer);
+                        retryTimer = null;
+                        return;
+                    }
+
                     showMessageBox(
                         'Waiting for parking data...',
-                        'No matching network response has been captured yet. Try running the search again.'
+                        'Automatic recovery is unavailable. Try running the search again.'
                     );
                 }
             }
@@ -1224,6 +1363,7 @@
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
         } else {
             clearParkingData();
+            clearAutoReloadState();
         }
     }
 
@@ -1263,6 +1403,7 @@
             setTimeout(retryInject, INITIAL_INJECT_DELAY_MS);
         } else {
             clearParkingData();
+            clearAutoReloadState();
         }
     }
 

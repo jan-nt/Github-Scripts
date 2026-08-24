@@ -8,6 +8,8 @@ const source = await readFile(
 );
 const startupMarker = '\n    migrateLegacyParkingData();';
 const startupIndex = source.lastIndexOf(startupMarker);
+const visiblePlateXpath =
+    '/html/body/div[1]/div/div/div/div/div[2]/div[1]/div/div[1]/div[1]/span[2]';
 
 assert.notEqual(startupIndex, -1, 'Could not isolate userscript startup');
 
@@ -15,6 +17,7 @@ const testSource = `${source.slice(0, startupIndex)}
     globalThis.__adminPanelTest = {
         buildParkingDataFromResponse,
         handleNavigationChange,
+        scheduleAutoRecoveryReload,
         setLatestData(value) {
             latestData = value;
         },
@@ -27,10 +30,18 @@ const testSource = `${source.slice(0, startupIndex)}
 function createScenario() {
     let visiblePlate = 'OLD123';
     let removedPanel = false;
+    let reloadCount = 0;
+    let nextTimerId = 1;
     const storage = new Map();
+    const timers = new Map();
     const location = {
         href: 'https://betaling.passpay.no/parkings',
-        pathname: '/parkings'
+        pathname: '/parkings',
+        search: '',
+        hash: '',
+        reload() {
+            reloadCount++;
+        }
     };
     const panel = {
         remove() {
@@ -47,8 +58,11 @@ function createScenario() {
         getElementById(id) {
             return id === 'tm-parking-info' ? panel : null;
         },
-        evaluate() {
-            return { singleNodeValue: visiblePlateElement };
+        evaluate(xpath) {
+            return {
+                singleNodeValue:
+                    xpath === visiblePlateXpath ? visiblePlateElement : null
+            };
         }
     };
 
@@ -70,9 +84,17 @@ function createScenario() {
             }
         },
         clearInterval() {},
-        clearTimeout() {},
+        clearTimeout(id) {
+            timers.delete(id);
+        },
         setTimeout() {},
-        window: { setTimeout() {} }
+        window: {
+            setTimeout(callback) {
+                const id = nextTimerId++;
+                timers.set(id, callback);
+                return id;
+            }
+        }
     };
 
     vm.runInNewContext(testSource, context);
@@ -83,7 +105,15 @@ function createScenario() {
         setVisiblePlate(value) {
             visiblePlate = value;
         },
-        wasPanelRemoved: () => removedPanel
+        wasPanelRemoved: () => removedPanel,
+        getReloadCount: () => reloadCount,
+        runTimers() {
+            while (timers.size > 0) {
+                const [id, callback] = timers.entries().next().value;
+                timers.delete(id);
+                callback();
+            }
+        }
     };
 }
 
@@ -126,5 +156,21 @@ scenario.api.handleNavigationChange();
 
 assert.equal(scenario.api.getLatestData(), null);
 assert.equal(scenario.wasPanelRemoved(), true);
+
+const recoveryScenario = createScenario();
+
+assert.equal(
+    recoveryScenario.api.scheduleAutoRecoveryReload(),
+    'scheduled'
+);
+recoveryScenario.runTimers();
+assert.equal(recoveryScenario.getReloadCount(), 1);
+
+assert.equal(
+    recoveryScenario.api.scheduleAutoRecoveryReload(),
+    'exhausted'
+);
+recoveryScenario.runTimers();
+assert.equal(recoveryScenario.getReloadCount(), 1);
 
 console.log('PassPay search admin panel tests passed.');
