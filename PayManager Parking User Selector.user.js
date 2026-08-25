@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.9.3
+// @version      2.9.4
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -1578,7 +1578,6 @@
                         border:1px solid #999;
                         border-radius:4px;
                         font-size:14px;
-                        text-transform:uppercase;
                     "
                 >
                 <button

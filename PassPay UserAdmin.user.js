@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      1.9.1
+// @version      1.9.2
 // @description  Converts ChainID and PaymentID values into clickable links and adds smart search helpers
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -25,6 +25,7 @@
 
     const STYLE_ID = 'pp-useradmin-styles';
     const BUTTON_ID = 'pp-useradmin-remove-spaces-btn';
+    const SEARCH_ROW_CLASS = 'pp-useradmin-search-row';
     const SMART_INPUT_MARKER = 'ppUseradminSmartSpaces';
     const LINK_MARKER = 'ppUseradminLinkified';
     const LINK_ATTRIBUTE = 'data-pp-useradmin-link';
@@ -39,6 +40,7 @@
     let observer = null;
     let runScheduled = false;
     let animationFrame = null;
+    let activeSearchRow = null;
     const pendingRoots = new Set();
 
     function isAdministrationPage() {
@@ -66,7 +68,8 @@
                 appearance: none;
                 min-width: 64px;
                 border: 0;
-                margin: 0 0 1px 8px;
+                flex: 0 0 auto;
+                margin: 6px 0 0;
                 padding: 6px 16px;
                 border-radius: 4px;
                 background-color: #ffc94d;
@@ -114,6 +117,23 @@
                 color: #1976d2;
                 text-decoration: underline;
                 cursor: pointer;
+            }
+
+            .${SEARCH_ROW_CLASS} {
+                display: flex !important;
+                align-items: flex-start;
+                flex: 0 1 390px !important;
+                flex-wrap: wrap;
+                gap: 6px 8px;
+                width: min(100%, 390px) !important;
+                max-width: 100% !important;
+                min-width: 0;
+            }
+
+            .${SEARCH_ROW_CLASS} > .MuiFormControl-root {
+                flex: 1 1 240px;
+                width: auto !important;
+                min-width: 0;
             }
         `;
 
@@ -291,6 +311,13 @@
 
         if (!formControl || !parent) return;
 
+        if (activeSearchRow && activeSearchRow !== parent) {
+            activeSearchRow.classList.remove(SEARCH_ROW_CLASS);
+        }
+
+        activeSearchRow = parent;
+        activeSearchRow.classList.add(SEARCH_ROW_CLASS);
+
         let button = document.getElementById(BUTTON_ID);
 
         if (!button) {
@@ -316,6 +343,11 @@
 
     function removeSearchButton() {
         document.getElementById(BUTTON_ID)?.remove();
+
+        if (activeSearchRow) {
+            activeSearchRow.classList.remove(SEARCH_ROW_CLASS);
+            activeSearchRow = null;
+        }
     }
 
     function getIdentifierUrl(element, text) {
