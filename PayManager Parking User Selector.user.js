@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.9.2
+// @version      2.9.3
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -73,6 +73,8 @@
     const UI_ID = 'tm-prs-search-box';
     const INPUT_ID = 'tm-prs-search-input';
     const PLATE_INPUT_ID = 'tm-parking-license-plate-input';
+    const PRS_CLEAR_BUTTON_ID = 'tm-prs-search-clear';
+    const PLATE_CLEAR_BUTTON_ID = 'tm-parking-license-plate-clear';
     const RESULTS_ID = 'tm-prs-search-results';
     const STATUS_ID = 'tm-prs-search-status';
 
@@ -212,7 +214,38 @@
 
         if (input) {
             input.value = normalizePlate(licensePlate);
+            syncClearButton(input, PLATE_CLEAR_BUTTON_ID);
         }
+    }
+
+    function setClearButtonVisibility(button, input) {
+        if (!button || !input) return;
+
+        const hasValue = Boolean(String(input.value || ''));
+        button.style.display = hasValue ? 'flex' : 'none';
+        button.setAttribute('aria-hidden', String(!hasValue));
+    }
+
+    function syncClearButton(input, buttonId) {
+        setClearButtonVisibility(
+            document.getElementById(buttonId),
+            input
+        );
+    }
+
+    function bindClearButton(button, input, onClear) {
+        if (!button || !input) return;
+
+        setClearButtonVisibility(button, input);
+
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            input.value = '';
+            onClear?.();
+            setClearButtonVisibility(button, input);
+            input.focus();
+        });
     }
 
     function getRequestedHandoff() {
@@ -833,7 +866,10 @@
             updateJqueryMobileButton(option.label);
 
             const input = document.getElementById(INPUT_ID);
-            if (input) input.value = option.label;
+            if (input) {
+                input.value = option.label;
+                syncClearButton(input, PRS_CLEAR_BUTTON_ID);
+            }
 
             if (shouldSave) saveSelectedUser(option.value);
 
@@ -852,6 +888,7 @@
 
         if (input) {
             input.value = option.label;
+            syncClearButton(input, PRS_CLEAR_BUTTON_ID);
         }
 
         if (shouldSave) {
@@ -1412,6 +1449,7 @@
                     !activeManualHandoff
                 ) {
                     input.value = '';
+                    syncClearButton(input, PLATE_CLEAR_BUTTON_ID);
                 }
             }, delay);
         });
@@ -1455,27 +1493,53 @@
                 Search PRS User
             </div>
 
-            <input
-    id="${INPUT_ID}"
-    type="text"
-    placeholder="Search user or value..."
-    autocomplete="off"
-    autocorrect="off"
-    autocapitalize="off"
-    spellcheck="false"
-    role="combobox"
-    aria-autocomplete="list"
-    aria-haspopup="listbox"
-    data-form-type="other"
-    style="
-        width:100%;
-        box-sizing:border-box;
-        padding:8px;
-        border:1px solid #999;
-        border-radius:4px;
-        font-size:14px;
-    "
->
+            <div style="position:relative;">
+                <input
+                    id="${INPUT_ID}"
+                    type="text"
+                    placeholder="Search user or value..."
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-haspopup="listbox"
+                    data-form-type="other"
+                    style="
+                        width:100%;
+                        box-sizing:border-box;
+                        padding:8px 36px 8px 8px;
+                        border:1px solid #999;
+                        border-radius:4px;
+                        font-size:14px;
+                    "
+                >
+                <button
+                    id="${PRS_CLEAR_BUTTON_ID}"
+                    type="button"
+                    aria-label="Clear PRS user search"
+                    title="Clear PRS user search"
+                    style="
+                        display:none;
+                        position:absolute;
+                        right:3px;
+                        top:50%;
+                        transform:translateY(-50%);
+                        align-items:center;
+                        justify-content:center;
+                        width:28px;
+                        height:28px;
+                        padding:0;
+                        border:0;
+                        border-radius:50%;
+                        background:transparent;
+                        color:#666;
+                        font:22px/1 Arial,sans-serif;
+                        cursor:pointer;
+                    "
+                >&times;</button>
+            </div>
 
             <div
                 id="${RESULTS_ID}"
@@ -1495,27 +1559,53 @@
                 Search License Plate
             </div>
 
-            <input
-                id="${PLATE_INPUT_ID}"
-                type="text"
-                placeholder="Enter license plate..."
-                name="tm-parking-plate-query"
-                autocomplete="one-time-code"
-                autocorrect="off"
-                autocapitalize="characters"
-                spellcheck="false"
-                data-form-type="other"
-                readonly
-                style="
-                    width:100%;
-                    box-sizing:border-box;
-                    padding:8px;
-                    border:1px solid #999;
-                    border-radius:4px;
-                    font-size:14px;
-                    text-transform:uppercase;
-                "
-            >
+            <div style="position:relative;">
+                <input
+                    id="${PLATE_INPUT_ID}"
+                    type="text"
+                    placeholder="Enter license plate..."
+                    name="tm-parking-plate-query"
+                    autocomplete="one-time-code"
+                    autocorrect="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    data-form-type="other"
+                    readonly
+                    style="
+                        width:100%;
+                        box-sizing:border-box;
+                        padding:8px 36px 8px 8px;
+                        border:1px solid #999;
+                        border-radius:4px;
+                        font-size:14px;
+                        text-transform:uppercase;
+                    "
+                >
+                <button
+                    id="${PLATE_CLEAR_BUTTON_ID}"
+                    type="button"
+                    aria-label="Clear license-plate search"
+                    title="Clear license-plate search"
+                    style="
+                        display:none;
+                        position:absolute;
+                        right:3px;
+                        top:50%;
+                        transform:translateY(-50%);
+                        align-items:center;
+                        justify-content:center;
+                        width:28px;
+                        height:28px;
+                        padding:0;
+                        border:0;
+                        border-radius:50%;
+                        background:transparent;
+                        color:#666;
+                        font:22px/1 Arial,sans-serif;
+                        cursor:pointer;
+                    "
+                >&times;</button>
+            </div>
 
             <div
                 id="${STATUS_ID}"
@@ -1550,6 +1640,7 @@
 
             if (plateInput) {
                 plateInput.value = '';
+                syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
                 guardBlankPlateEditor(plateInput);
             }
         }
@@ -1558,8 +1649,9 @@
             select.options[select.selectedIndex];
 
         if (currentOption) {
-            document.getElementById(INPUT_ID).value =
-                currentOption.textContent.trim();
+            const prsInput = document.getElementById(INPUT_ID);
+            prsInput.value = currentOption.textContent.trim();
+            syncClearButton(prsInput, PRS_CLEAR_BUTTON_ID);
 
             setStatus(
                 `Current: ${currentOption.textContent.trim()} (${currentOption.value})`
@@ -1581,9 +1673,11 @@
             const licensePlate = normalizePlate(plateInput.value);
 
             plateInput.value = licensePlate;
+            syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
 
             if (!hasOnlyPlateCharacters(licensePlate)) {
                 plateInput.value = '';
+                syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
                 cancelPlateSearch(
                     'Enter a valid license plate using letters and numbers.'
                 );
@@ -1616,11 +1710,13 @@
         plateInput.addEventListener('input', event => {
             if (!plateEditorActivated) {
                 plateInput.value = '';
+                syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
                 return;
             }
 
             const licensePlate = normalizePlate(plateInput.value);
             plateInput.value = licensePlate;
+            syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
 
             if (plateSearchTimer !== null) {
                 window.clearTimeout(plateSearchTimer);
@@ -1629,6 +1725,7 @@
 
             if (!hasOnlyPlateCharacters(licensePlate)) {
                 plateInput.value = '';
+                syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
                 cancelPlateSearch(
                     'Enter a valid license plate using letters and numbers.'
                 );
@@ -1662,6 +1759,7 @@
 
         plateInput.addEventListener('blur', () => {
             plateInput.value = normalizePlate(plateInput.value);
+            syncClearButton(plateInput, PLATE_CLEAR_BUTTON_ID);
         });
     }
 
@@ -1675,6 +1773,12 @@
         if (!input || !resultsBox) return;
 
         const plateInput = document.getElementById(PLATE_INPUT_ID);
+        const prsClearButton = document.getElementById(
+            PRS_CLEAR_BUTTON_ID
+        );
+        const plateClearButton = document.getElementById(
+            PLATE_CLEAR_BUTTON_ID
+        );
 
         bindPlateSearchEvents(plateInput);
 
@@ -1776,6 +1880,8 @@
         }
 
         function search() {
+            syncClearButton(input, PRS_CLEAR_BUTTON_ID);
+
             const query = normalize(
                 input.value.trim()
             );
@@ -1839,6 +1945,19 @@
 
             renderResults(matches);
         }
+
+        bindClearButton(prsClearButton, input, () => {
+            resultsBox.style.display = 'none';
+            resultsBox.innerHTML = '';
+            currentMatches = [];
+            activeIndex = -1;
+        });
+
+        bindClearButton(plateClearButton, plateInput, () => {
+            plateEditorActivated = true;
+            plateInput.removeAttribute('readonly');
+            cancelPlateSearch();
+        });
 
         input.addEventListener('input', search);
 

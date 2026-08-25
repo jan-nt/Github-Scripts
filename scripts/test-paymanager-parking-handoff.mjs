@@ -18,6 +18,7 @@ const testSource = `${source.slice(0, initIndex)}
         restartParkingSearch,
         getEffectiveHandoff,
         bindPlateSearchEvents,
+        bindClearButton,
         cancelPlateSearch,
         clearLegacyManualPlateState,
         guardBlankPlateEditor,
@@ -741,6 +742,47 @@ dynamicPlate.plateEditor.emit('input');
 assert.equal(dynamicPlate.input.value, '');
 assert.equal(
     dynamicPlate.status.textContent,
+    'License-plate search is inactive.'
+);
+
+// The inline clear control hides when empty and cancels the live table filter.
+const buttonClear = createHandoffScenario({ locationHash: '' });
+const clearButtonListeners = new Map();
+const clearButtonAttributes = new Map();
+const clearButton = {
+    style: {},
+    setAttribute(name, value) {
+        clearButtonAttributes.set(name, String(value));
+    },
+    addEventListener(type, listener) {
+        clearButtonListeners.set(type, listener);
+    },
+    click() {
+        clearButtonListeners.get('click')?.({
+            preventDefault() {},
+            stopPropagation() {}
+        });
+    }
+};
+
+buttonClear.plateEditor.value = 'BUTTON123';
+buttonClear.input.value = 'BUTTON123';
+buttonClear.api.bindClearButton(
+    clearButton,
+    buttonClear.plateEditor,
+    () => buttonClear.api.cancelPlateSearch()
+);
+
+assert.equal(clearButton.style.display, 'flex');
+assert.equal(clearButtonAttributes.get('aria-hidden'), 'false');
+clearButton.click();
+assert.equal(buttonClear.plateEditor.value, '');
+assert.equal(buttonClear.input.value, '');
+assert.equal(clearButton.style.display, 'none');
+assert.equal(clearButtonAttributes.get('aria-hidden'), 'true');
+assert.equal(buttonClear.plateEditor.focused, true);
+assert.equal(
+    buttonClear.status.textContent,
     'License-plate search is inactive.'
 );
 
