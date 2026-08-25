@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.9
+// @version      2.9.1
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -16,6 +16,11 @@
 
 (function () {
     'use strict';
+
+    const SCRIPT_INSTANCE_KEY = '__payManagerParkingUserSelectorLoaded';
+
+    if (window[SCRIPT_INSTANCE_KEY]) return;
+    window[SCRIPT_INSTANCE_KEY] = true;
 
     // =========================
     // SETTINGS
@@ -55,6 +60,10 @@
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[4]/label/form/input';
     const PARKING_ENTRIES_INFO_XPATH =
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[6]';
+    const PARKING_TABLE_ID = 'parkings_table';
+    const PARKING_ENTRIES_INFO_ID = 'parkings_table_info';
+    const PARKING_FILTER_ID = 'parkings_table_filter';
+    const PARKING_PROCESSING_ID = 'parkings_table_processing';
     const ACTIVE_STATUS_BUTTON_ID = 'parkings_active_btn';
     const PENDING_STATUS_BUTTON_ID = 'parkings_pending_btn';
     const ACTIVE_STATUS_XPATH =
@@ -75,6 +84,14 @@
     let restoring = false;
     let lastAppliedValue = null;
     let handoffRunId = 0;
+    let plateSearchTimer = null;
+    let restoreTimer = null;
+    let tableMutationVersion = 0;
+    let tableObserver = null;
+    let observedTableContainer = null;
+    let latestTableAction = null;
+    let panelObserver = null;
+    let panelCheckScheduled = false;
 
     function getSelect() {
         return document.getElementById(SELECT_ID);
@@ -192,7 +209,11 @@
 
             sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
         } catch {
-            // Ignore unavailable or malformed session storage.
+            try {
+                sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
+            } catch {
+                // Ignore unavailable session storage.
+            }
         }
 
         return '';
@@ -208,12 +229,16 @@
 
     function getRequestedHandoff() {
         const params = new URLSearchParams(location.hash.slice(1));
+        const hasUrlHandoff =
+            params.has(AREA_MANAGER_PARAM) ||
+            params.has(LICENSE_PLATE_PARAM);
         const fromUrl = {
             areaManager: String(params.get(AREA_MANAGER_PARAM) || '').trim(),
-            licensePlate: normalizePlate(params.get(LICENSE_PLATE_PARAM))
+            licensePlate: normalizePlate(params.get(LICENSE_PLATE_PARAM)),
+            explicit: hasUrlHandoff
         };
 
-        if (fromUrl.areaManager || fromUrl.licensePlate) {
+        if (hasUrlHandoff) {
             savePendingHandoff(fromUrl);
             return fromUrl;
         }
@@ -230,23 +255,39 @@
             ) {
                 return {
                     areaManager: String(stored.areaManager || '').trim(),
-                    licensePlate: normalizePlate(stored.licensePlate)
+                    licensePlate: normalizePlate(stored.licensePlate),
+                    explicit: Boolean(
+                        stored.explicit || stored.areaManager
+                    )
                 };
             }
 
             sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
         } catch {
-            // Ignore unavailable or malformed session storage.
+            try {
+                sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+                sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+            } catch {
+                // Ignore unavailable session storage.
+            }
         }
 
         return {
             areaManager: '',
-            licensePlate: ''
+            licensePlate: '',
+            explicit: false
         };
     }
 
     function getEffectiveHandoff() {
         const requested = getRequestedHandoff();
+
+        if (requested.explicit) {
+            saveManualPlate(requested.licensePlate);
+            setPlateEditorValue(requested.licensePlate);
+            return requested;
+        }
 
         if (requested.licensePlate) {
             saveManualPlate(requested.licensePlate);
@@ -260,7 +301,8 @@
             setPlateEditorValue(manualPlate);
             return {
                 areaManager: requested.areaManager,
-                licensePlate: manualPlate
+                licensePlate: manualPlate,
+                explicit: false
             };
         }
 
@@ -274,6 +316,8 @@
         } catch {
             // Ignore unavailable session storage.
         }
+
+        latestTableAction = null;
 
         const params = new URLSearchParams(location.hash.slice(1));
         params.delete(AREA_MANAGER_PARAM);
@@ -294,6 +338,17 @@
         if (handoffTimer !== null) {
             window.clearTimeout(handoffTimer);
             handoffTimer = null;
+        }
+
+        if (plateSearchTimer !== null) {
+            window.clearTimeout(plateSearchTimer);
+            plateSearchTimer = null;
+        }
+
+        if (restoreTimer !== null) {
+            window.clearTimeout(restoreTimer);
+            restoreTimer = null;
+            restoring = false;
         }
     }
 
@@ -320,7 +375,12 @@
 
         savePendingHandoff({
             areaManager,
-            licensePlate: normalizedPlate
+            licensePlate: normalizedPlate,
+            explicit: Boolean(
+                preserveRequestedAreaManager &&
+                existingHandoff.explicit &&
+                areaManager
+            )
         });
         setStatus(`Preparing search for: ${normalizedPlate}`);
 
@@ -378,11 +438,182 @@
     }
 
     function getParkingSearchInput() {
-        return getElementByXPath(PARKING_SEARCH_INPUT_XPATH);
+        return document.querySelector?.(
+            `#${PARKING_FILTER_ID} input[type="search"], ` +
+            `input[type="search"][aria-controls="${PARKING_TABLE_ID}"]`
+        ) || getElementByXPath(PARKING_SEARCH_INPUT_XPATH);
     }
 
     function getParkingEntriesInfo() {
-        return getElementByXPath(PARKING_ENTRIES_INFO_XPATH);
+        return document.getElementById(PARKING_ENTRIES_INFO_ID) ||
+            getElementByXPath(PARKING_ENTRIES_INFO_XPATH);
+    }
+
+    function getParkingTable() {
+        return document.getElementById(PARKING_TABLE_ID);
+    }
+
+    function getParkingTableContainer() {
+        const table = getParkingTable();
+        const info = getParkingEntriesInfo();
+
+        return table?.closest?.('.dataTables_wrapper') ||
+            table?.parentElement ||
+            info?.parentElement ||
+            null;
+    }
+
+    function ensureTableObserver() {
+        if (typeof MutationObserver !== 'function') return;
+
+        const container = getParkingTableContainer();
+
+        if (!container || container === observedTableContainer) return;
+
+        tableObserver?.disconnect();
+        observedTableContainer = container;
+        tableObserver = new MutationObserver(() => {
+            tableMutationVersion++;
+        });
+        tableObserver.observe(container, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['class', 'style', 'aria-busy', 'aria-hidden']
+        });
+    }
+
+    function resetTableObserverTracking() {
+        tableObserver?.disconnect();
+        tableObserver = null;
+        observedTableContainer = null;
+        tableMutationVersion = 0;
+        latestTableAction = null;
+    }
+
+    function getParkingTableFingerprint() {
+        const infoText = normalizeEntriesText(
+            getParkingEntriesInfo()?.textContent
+        );
+        const tableText = normalizeEntriesText(
+            getParkingTable()?.tBodies?.[0]?.textContent ||
+            getParkingTable()?.textContent
+        ).slice(0, 5000);
+
+        return `${infoText}\n${tableText}`;
+    }
+
+    function markTableReloadExpected() {
+        ensureTableObserver();
+        latestTableAction = {
+            fingerprint: getParkingTableFingerprint(),
+            mutationVersion: tableMutationVersion
+        };
+
+        return latestTableAction;
+    }
+
+    function getLatestTableActionSnapshot() {
+        return latestTableAction
+            ? { ...latestTableAction }
+            : null;
+    }
+
+    function hasTableChangedSince(action) {
+        if (!action) return true;
+
+        ensureTableObserver();
+
+        return tableMutationVersion > action.mutationVersion ||
+            getParkingTableFingerprint() !== action.fingerprint;
+    }
+
+    function isParkingTableProcessing() {
+        const processing = document.getElementById(PARKING_PROCESSING_ID);
+
+        if (!processing) return false;
+        if (processing.hidden) return false;
+        if (processing.getAttribute?.('aria-hidden') === 'true') return false;
+        if (processing.style?.display === 'none') return false;
+
+        try {
+            if (window.getComputedStyle?.(processing).display === 'none') {
+                return false;
+            }
+        } catch {
+            // The element's direct attributes remain a useful fallback.
+        }
+
+        return true;
+    }
+
+    function getRenderedParkingRows() {
+        const table = getParkingTable();
+
+        if (!table?.querySelectorAll) return [];
+
+        return Array.from(table.querySelectorAll('tbody tr')).filter(row => {
+            if (row.hidden) return false;
+            if (row.getAttribute?.('aria-hidden') === 'true') return false;
+            if (row.style?.display === 'none') return false;
+            if (row.querySelector?.('td.dataTables_empty')) return false;
+
+            try {
+                if (window.getComputedStyle?.(row).display === 'none') {
+                    return false;
+                }
+            } catch {
+                // Direct visibility attributes are sufficient in this fallback.
+            }
+
+            return true;
+        });
+    }
+
+    function rowContainsPlate(row, licensePlate) {
+        const wanted = normalizePlate(licensePlate);
+
+        if (!wanted) return false;
+
+        const cells = row.cells
+            ? Array.from(row.cells)
+            : Array.from(row.querySelectorAll?.('td, th') || []);
+
+        if (!cells.length) {
+            return normalizePlate(row.textContent) === wanted;
+        }
+
+        return cells.some(cell => {
+            const candidateValues = [
+                cell.textContent,
+                cell.getAttribute?.('data-search'),
+                cell.getAttribute?.('data-filter'),
+                cell.getAttribute?.('title')
+            ];
+
+            return candidateValues.some(value => {
+                return normalizePlate(value) === wanted;
+            });
+        });
+    }
+
+    function hasRenderedPlateMatch(licensePlate) {
+        const rows = getRenderedParkingRows();
+
+        return rows.length > 0 && rows.every(row => {
+            return rowContainsPlate(row, licensePlate);
+        });
+    }
+
+    function beginTableReloadAction() {
+        const input = getParkingSearchInput();
+
+        if (input && String(input.value || '')) {
+            setParkingSearchValue(input, '');
+        }
+
+        return markTableReloadExpected();
     }
 
     function getPendingStatusButton() {
@@ -489,7 +720,6 @@
             const $select = window.jQuery(select);
 
             $select.val(select.value);
-            $select.trigger('change');
 
             if (typeof $select.selectmenu === 'function') {
                 try {
@@ -553,6 +783,11 @@
 
             return sanitized;
         } catch {
+            try {
+                localStorage.removeItem(STORAGE_KEY);
+            } catch {
+                // Ignore unavailable local storage.
+            }
             return null;
         }
     }
@@ -585,6 +820,7 @@
 
         lastAppliedValue = option.value;
 
+        beginTableReloadAction();
         select.value = option.value;
 
         updateJqueryMobileButton(option.label);
@@ -609,24 +845,30 @@
         return true;
     }
 
-    function restoreLastSelectedUser() {
+    function restoreLastSelectedUser(onComplete) {
         if (!RESTORE_LAST_SELECTED || restoring) {
-            return;
+            return false;
         }
 
         const saved = getSavedSelectedUser();
 
         if (!saved || !saved.value) {
-            return;
+            return false;
         }
 
         restoring = true;
 
-        setTimeout(() => {
+        if (restoreTimer !== null) {
+            window.clearTimeout(restoreTimer);
+        }
+
+        restoreTimer = window.setTimeout(() => {
+            restoreTimer = null;
             const currentSelect = getSelect();
 
             if (!currentSelect) {
                 restoring = false;
+                onComplete?.(false);
                 return;
             }
 
@@ -642,8 +884,11 @@
             }
 
             restoring = false;
+            onComplete?.(Boolean(optionExists));
 
         }, RESTORE_DELAY_MS);
+
+        return true;
     }
 
     function applyRequestedHandoff() {
@@ -663,10 +908,15 @@
         let parkingStatusClickRequested = false;
         let pendingStatusAttempted =
             wasPendingStatusAttempted(initialHandoff);
+        let tableAction = getLatestTableActionSnapshot();
         let tableWaitStartedAt = null;
         let tableFilterCleared = false;
         let tableReadyEntriesText = '';
+        let tableReadyFingerprint = '';
+        let lastTableEntriesText = '';
+        let stableTableChecks = 0;
         let filterStartedAt = null;
+        let filterStartMutationVersion = 0;
         let lastPlateDispatchAt = 0;
         let plateDispatchCount = 0;
         let lastPlateInput = null;
@@ -682,10 +932,15 @@
         }
 
         function resetSearchPhase() {
+            tableAction = getLatestTableActionSnapshot();
             tableWaitStartedAt = null;
             tableFilterCleared = false;
             tableReadyEntriesText = '';
+            tableReadyFingerprint = '';
+            lastTableEntriesText = '';
+            stableTableChecks = 0;
             filterStartedAt = null;
+            filterStartMutationVersion = 0;
             lastPlateDispatchAt = 0;
             plateDispatchCount = 0;
             lastPlateInput = null;
@@ -725,14 +980,32 @@
             return true;
         }
 
-        function dispatchPlateSearch(input, handoff, isRepeat = false) {
+        function dispatchPlateSearch(
+            input,
+            handoff,
+            isRepeat = false,
+            restartFilterWindow = false
+        ) {
+            if (restartFilterWindow) {
+                filterStartedAt = null;
+                lastPlateDispatchAt = 0;
+                plateDispatchCount = 0;
+                lastEntriesText = '';
+                stableResultChecks = 0;
+            }
+
             if (filterStartedAt === null) {
                 const entriesInfo = getParkingEntriesInfo();
 
                 tableReadyEntriesText = normalizeEntriesText(
                     entriesInfo?.textContent
                 );
+                ensureTableObserver();
+                tableReadyFingerprint = getParkingTableFingerprint();
+                filterStartMutationVersion = tableMutationVersion;
                 filterStartedAt = Date.now();
+                lastEntriesText = '';
+                stableResultChecks = 0;
             }
 
             setParkingSearchValue(input, handoff.licensePlate);
@@ -768,6 +1041,7 @@
             if (!parkingStatusClickRequested) {
                 parkingStatusClickRequested = true;
                 parkingStatusClickedAt = Date.now();
+                beginTableReloadAction();
                 resetSearchPhase();
                 setStatus(`Switching to ${statusName}...`);
                 button.click();
@@ -792,26 +1066,24 @@
                 `No active or Pending entries found for: ${handoff.licensePlate}`,
                 '#a15c00'
             );
-            input?.focus();
+            (document.getElementById(PLATE_INPUT_ID) || input)?.focus();
             return true;
         }
 
-        function finishFilteredResult(handoff, input, entriesText) {
-            if (isEmptyEntriesText(entriesText)) {
-                return finishCurrentStatusAsEmpty(handoff, input);
-            }
-
-            if (!isEntriesSummaryText(entriesText)) {
-                failureMessage = 'Parking result summary was not recognized';
-                return false;
-            }
-
+        function finishMatchedResult(handoff, input) {
             clearRequestedHandoff();
             setStatus(
                 `Found in ${pendingStatusAttempted ? 'Pending' : 'Active'}: ${handoff.licensePlate}`,
                 'green'
             );
             input.focus();
+            return true;
+        }
+
+        function finishUnverifiedResult(handoff, input, message) {
+            clearRequestedHandoff();
+            setStatus(message, 'red');
+            (document.getElementById(PLATE_INPUT_ID) || input)?.focus();
             return true;
         }
 
@@ -828,6 +1100,8 @@
                 if (String(input.value || '')) {
                     setParkingSearchValue(input, '');
                     tableWaitStartedAt = now;
+                    lastTableEntriesText = '';
+                    stableTableChecks = 0;
                     setStatus(
                         `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
                     );
@@ -843,10 +1117,50 @@
             const tableHasRows = Boolean(
                 counts && (counts.first > 0 || counts.second > 0)
             );
+            const summaryRecognized = isEntriesSummaryText(entriesText);
+
+            if (entriesText === lastTableEntriesText) {
+                stableTableChecks++;
+            } else {
+                lastTableEntriesText = entriesText;
+                stableTableChecks = entriesText ? 1 : 0;
+            }
+
             const fallbackElapsed =
                 now - tableWaitStartedAt >= HANDOFF_TABLE_READY_FALLBACK_MS;
+            const tableChangedAfterAction = hasTableChangedSince(tableAction);
 
-            if (!tableHasRows && !fallbackElapsed) {
+            if (isParkingTableProcessing()) {
+                failureMessage =
+                    `${pendingStatusAttempted ? 'Pending' : 'Active'} table is still loading`;
+                setStatus(
+                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                );
+                return false;
+            }
+
+            if (!tableChangedAfterAction) {
+                if (
+                    fallbackElapsed &&
+                    summaryRecognized &&
+                    isEmptyEntriesText(entriesText) &&
+                    stableTableChecks >= HANDOFF_STABLE_RESULT_CHECKS
+                ) {
+                    return finishCurrentStatusAsEmpty(handoff, input);
+                }
+
+                failureMessage =
+                    `${pendingStatusAttempted ? 'Pending' : 'Active'} table did not finish reloading`;
+                setStatus(
+                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                );
+                return false;
+            }
+
+            if (
+                (!tableHasRows || stableTableChecks < HANDOFF_STABLE_RESULT_CHECKS) &&
+                !fallbackElapsed
+            ) {
                 setStatus(
                     `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
                 );
@@ -855,10 +1169,16 @@
 
             if (
                 fallbackElapsed &&
-                entriesText &&
-                isEmptyEntriesText(entriesText)
+                summaryRecognized &&
+                isEmptyEntriesText(entriesText) &&
+                stableTableChecks >= HANDOFF_STABLE_RESULT_CHECKS
             ) {
                 return finishCurrentStatusAsEmpty(handoff, input);
+            }
+
+            if (!tableHasRows || !summaryRecognized) {
+                failureMessage = 'Parking table summary was not ready';
+                return false;
             }
 
             dispatchPlateSearch(input, handoff);
@@ -867,6 +1187,16 @@
 
         function checkFilteredResult(handoff, input) {
             const now = Date.now();
+
+            if (isParkingTableProcessing()) {
+                stableResultChecks = 0;
+                lastEntriesText = '';
+                setStatus(
+                    `Waiting for ${pendingStatusAttempted ? 'Pending' : 'Active'} search results...`
+                );
+                return false;
+            }
+
             const entriesInfo = getParkingEntriesInfo();
             const entriesText = normalizeEntriesText(
                 entriesInfo?.textContent
@@ -880,16 +1210,25 @@
             }
 
             const filterElapsed = now - filterStartedAt;
-            const resultChanged =
-                Boolean(entriesText) &&
-                entriesText !== tableReadyEntriesText;
+            const filterDrawObserved =
+                tableMutationVersion > filterStartMutationVersion ||
+                getParkingTableFingerprint() !== tableReadyFingerprint ||
+                (
+                    Boolean(entriesText) &&
+                    entriesText !== tableReadyEntriesText
+                );
+            const renderedMatch = hasRenderedPlateMatch(
+                handoff.licensePlate
+            );
 
             if (
-                resultChanged &&
+                filterDrawObserved &&
+                renderedMatch &&
+                isEntriesSummaryText(entriesText) &&
                 !isEmptyEntriesText(entriesText) &&
                 stableResultChecks >= HANDOFF_STABLE_RESULT_CHECKS
             ) {
-                return finishFilteredResult(handoff, input, entriesText);
+                return finishMatchedResult(handoff, input);
             }
 
             if (
@@ -903,12 +1242,36 @@
                 return false;
             }
 
-            if (entriesText && isEntriesSummaryText(entriesText)) {
-                return finishFilteredResult(handoff, input, entriesText);
+            if (
+                filterDrawObserved &&
+                isEntriesSummaryText(entriesText) &&
+                isEmptyEntriesText(entriesText) &&
+                stableResultChecks >= HANDOFF_STABLE_RESULT_CHECKS
+            ) {
+                return finishCurrentStatusAsEmpty(handoff, input);
             }
 
-            failureMessage = 'Parking result summary was not found';
-            return false;
+            if (!filterDrawObserved) {
+                return finishUnverifiedResult(
+                    handoff,
+                    input,
+                    `PayManager did not apply the plate filter for: ${handoff.licensePlate}`
+                );
+            }
+
+            if (!renderedMatch) {
+                return finishUnverifiedResult(
+                    handoff,
+                    input,
+                    `PayManager returned rows, but none matched: ${handoff.licensePlate}`
+                );
+            }
+
+            return finishUnverifiedResult(
+                handoff,
+                input,
+                `Parking result could not be verified for: ${handoff.licensePlate}`
+            );
         }
 
         function attemptSelection() {
@@ -952,7 +1315,12 @@
                         input !== lastPlateInput ||
                         currentPlate !== handoff.licensePlate
                     ) {
-                        dispatchPlateSearch(input, handoff, true);
+                        dispatchPlateSearch(
+                            input,
+                            handoff,
+                            true,
+                            input !== lastPlateInput
+                        );
                     }
 
                     if (checkFilteredResult(handoff, input)) return;
@@ -989,91 +1357,26 @@
         return true;
     }
 
-    function preventPasswordManager(input) {
+    function preventPasswordManager(input, fieldName) {
         if (!input) return;
 
-        // Set a completely random, non-credential-sounding name
-        input.name = '_x' + Math.random().toString(36).substring(2, 8);
-
-        // Remove any id attribute that might hint at credentials
-        // (the INPUT_ID constant is 'tm-prs-search-input' which is safe, but enforce anyway)
-        if (/user|pass|login|cred|account/i.test(input.id)) {
-            input.removeAttribute('id');
-        }
-
-        // Force all anti-password-manager attributes
+        input.name = fieldName;
         input.setAttribute('autocomplete', 'off');
         input.setAttribute('data-form-type', 'other');
         input.setAttribute('data-1p-ignore', 'true');
         input.setAttribute('data-lpignore', 'true');
         input.setAttribute('data-bwignore', 'true');
-
-        // Disable browser input heuristics
-        input.setAttribute('inputmode', 'none');
-
-        // The readonly trick: Chrome skips readonly fields when scanning for password fields
-        // We make it readonly, then remove readonly on focus so the user can type
-        if (!input.hasAttribute('data-readonly-fix')) {
-            input.setAttribute('data-readonly-fix', 'true');
-            input.readOnly = true;
-            const enableInput = () => {
-                input.readOnly = false;
-                input.removeEventListener('focus', enableInput);
-            };
-            input.addEventListener('focus', enableInput, { once: true });
-        }
     }
 
     function applyPasswordManagerDefense() {
-        const input = document.getElementById(INPUT_ID);
-        if (!input) return;
-
-        preventPasswordManager(input);
-
-        // Wrap the parent wrapper in a fake <form autocomplete="off">
-        // This is the strongest signal Chrome respects
-        const wrapper = document.getElementById(UI_ID);
-        if (wrapper && wrapper.tagName !== 'FORM') {
-            const form = document.createElement('form');
-            form.setAttribute('autocomplete', 'off');
-            form.style.display = 'contents';
-            form.style.margin = '0';
-            form.style.padding = '0';
-
-            // Add hidden dummy fields to absorb any autofill
-            const dummyUser = document.createElement('input');
-            dummyUser.type = 'text';
-            dummyUser.name = 'email_' + Math.random().toString(36).substring(2, 6);
-            dummyUser.style.display = 'none';
-            dummyUser.setAttribute('autocomplete', 'off');
-            dummyUser.tabIndex = -1;
-            dummyUser.readOnly = true;
-
-            const dummyPass = document.createElement('input');
-            dummyPass.type = 'password';
-            dummyPass.name = 'pass_' + Math.random().toString(36).substring(2, 6);
-            dummyPass.style.display = 'none';
-            dummyPass.setAttribute('autocomplete', 'off');
-            dummyPass.tabIndex = -1;
-            dummyPass.readOnly = true;
-
-            // Insert form before wrapper, move wrapper into form, prepend dummies
-            wrapper.parentNode.insertBefore(form, wrapper);
-            form.appendChild(wrapper);
-            form.insertBefore(dummyUser, wrapper);
-            form.insertBefore(dummyPass, wrapper);
-        }
-
-        // Re-apply protection at intervals to fight Chrome's delayed heuristic checks
-        [500, 1500, 3000].forEach(delay => {
-            setTimeout(() => {
-                const el = document.getElementById(INPUT_ID);
-                if (el) {
-                    el.setAttribute('autocomplete', 'off');
-                    el.setAttribute('data-form-type', 'other');
-                }
-            }, delay);
-        });
+        preventPasswordManager(
+            document.getElementById(INPUT_ID),
+            'tm-prs-filter'
+        );
+        preventPasswordManager(
+            document.getElementById(PLATE_INPUT_ID),
+            'tm-license-plate-filter'
+        );
     }
 
     function createSearchUi() {
@@ -1229,7 +1532,6 @@
         if (!input || !resultsBox) return;
 
         const plateInput = document.getElementById(PLATE_INPUT_ID);
-        let plateSearchTimer = null;
 
         function submitPlateSearch() {
             if (!plateInput) return;
@@ -1549,6 +1851,40 @@
         }
     }
 
+    function startInitialHandoffOrRestore() {
+        const initialHandoff = getEffectiveHandoff();
+        const isManualResume = Boolean(
+            initialHandoff.licensePlate &&
+            !initialHandoff.areaManager &&
+            !initialHandoff.explicit
+        );
+
+        if (isManualResume) {
+            const restoreScheduled = restoreLastSelectedUser(
+                restored => {
+                    if (restored) {
+                        applyRequestedHandoff();
+                    } else {
+                        setStatus(
+                            'Saved PRS user was not available. Select a PRS user to resume the plate search.',
+                            'red'
+                        );
+                    }
+                }
+            );
+
+            if (!restoreScheduled) {
+                applyRequestedHandoff();
+            }
+
+            return;
+        }
+
+        if (!applyRequestedHandoff()) {
+            restoreLastSelectedUser();
+        }
+    }
+
     function init() {
         if (initialized || initTimer !== null) {
             return;
@@ -1574,9 +1910,7 @@
                 clearInterval(initTimer);
                 initTimer = null;
 
-                if (!applyRequestedHandoff()) {
-                    restoreLastSelectedUser();
-                }
+                startInitialHandoffOrRestore();
             }
 
             if (
@@ -1590,29 +1924,59 @@
     }
 
     function watchForPanelReloads() {
-        const observer =
-            new MutationObserver(() => {
-                const select =
-                    getSelect();
+        panelObserver?.disconnect();
 
-                const ui =
-                    document.getElementById(
-                        UI_ID
-                    );
+        const observationRoot = getInsertTarget()?.parentElement ||
+            document.body;
 
-                if (
-                    select &&
-                    !ui
-                ) {
+        if (!observationRoot) return;
+
+        panelObserver = new MutationObserver(() => {
+            if (panelCheckScheduled) return;
+
+            panelCheckScheduled = true;
+            queueMicrotask(() => {
+                panelCheckScheduled = false;
+
+                const select = getSelect();
+                const ui = document.getElementById(UI_ID);
+
+                if (select && !ui) {
+                    cancelHandoffSearch();
+                    resetTableObserverTracking();
                     initialized = false;
                     init();
                 }
             });
+        });
 
-        observer.observe(document.body, {
+        panelObserver.observe(observationRoot, {
             childList: true,
             subtree: true
         });
+    }
+
+    function suspendRuntime() {
+        panelObserver?.disconnect();
+        panelObserver = null;
+        panelCheckScheduled = false;
+
+        if (initTimer !== null) {
+            clearInterval(initTimer);
+            initTimer = null;
+        }
+
+        cancelHandoffSearch();
+        resetTableObserverTracking();
+    }
+
+    function resumeRuntime() {
+        if (!document.getElementById(UI_ID)) {
+            initialized = false;
+        }
+
+        init();
+        watchForPanelReloads();
     }
 
     init();
@@ -1622,8 +1986,14 @@
     } else {
         window.addEventListener(
             'DOMContentLoaded',
-            watchForPanelReloads
+            watchForPanelReloads,
+            { once: true }
         );
     }
+
+    window.addEventListener('pagehide', suspendRuntime);
+    window.addEventListener('pageshow', event => {
+        if (event.persisted) resumeRuntime();
+    });
 
 })();

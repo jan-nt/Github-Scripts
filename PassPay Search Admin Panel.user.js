@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay Search Admin Panel
 // @namespace    https://nidushan.com
-// @version      7.6
+// @version      7.6.1
 // @description  Displays parking details with copy, screenshot, Chain ID, and PayManager handoff tools
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -42,6 +42,9 @@
     const AUTO_RELOAD_DELAY_MS = 750;
     const MAX_AUTO_RELOADS = 1;
     const MAX_JSON_RESPONSE_CHARS = 5_000_000;
+    const MAX_REQUEST_BODY_CHARS = 100_000;
+    const STYLE_HEAD_RETRY_MS = 50;
+    const STYLE_HEAD_MAX_ATTEMPTS = 100;
 
     const SEARCH_PAGE_PATH = '/search';
     const PARKING_PAGE_PATH = '/parkings';
@@ -72,6 +75,8 @@
     let retryTimer = null;
     let storageCleanupTimer = null;
     let autoReloadTimer = null;
+    let networkRequestSequence = 0;
+    let latestAcceptedResponseSequence = 0;
 
     /************************************************************
      * GLOBAL CSS
@@ -329,12 +334,27 @@
             }
         `;
 
+        let headAttempts = 0;
+
         const appendStyle = () => {
             if (document.head) {
                 document.head.appendChild(globalStyle);
                 document.head.appendChild(style);
-            } else {
-                setTimeout(appendStyle, 50);
+                return;
+            }
+
+            headAttempts++;
+
+            if (headAttempts < STYLE_HEAD_MAX_ATTEMPTS) {
+                setTimeout(appendStyle, STYLE_HEAD_RETRY_MS);
+                return;
+            }
+
+            const fallbackTarget = document.documentElement;
+
+            if (fallbackTarget) {
+                fallbackTarget.appendChild(globalStyle);
+                fallbackTarget.appendChild(style);
             }
         };
 
@@ -465,6 +485,9 @@
         return createElement('button', {
             className: 'tm-parking-button',
             textContent: label,
+            attributes: {
+                type: 'button'
+            },
             onClick
         });
     }
@@ -737,6 +760,162 @@
      * NETWORK RESPONSE PARSING
      ************************************************************/
 
+    function getRecognizedLocations(data, requestContext = {}) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            return null;
+        }
+
+        const candidates = [
+            data,
+            data.data,
+            data.result,
+            data.payload,
+            data.response
+        ];
+
+        for (const candidate of candidates) {
+            if (
+                !candidate ||
+                typeof candidate !== 'object' ||
+                Array.isArray(candidate) ||
+                !Object.prototype.hasOwnProperty.call(candidate, 'locations') ||
+                !Array.isArray(candidate.locations)
+            ) {
+                continue;
+            }
+
+            if (candidate.locations.length === 0) {
+                const requestLooksRelevant =
+                    Boolean(requestContext.requestedPlate) ||
+                    /park(?:ing|ings)|vehicle|licen[cs]e|registration/i.test(
+                        String(requestContext.url || '')
+                    );
+
+                if (requestLooksRelevant) {
+                    return candidate.locations;
+                }
+
+                continue;
+            }
+
+            const hasParkingCollection = candidate.locations.some(location => {
+                return Boolean(
+                    location &&
+                    typeof location === 'object' &&
+                    Array.isArray(location.parkings)
+                );
+            });
+
+            if (hasParkingCollection) {
+                return candidate.locations;
+            }
+        }
+
+        return null;
+    }
+
+    function isPlausiblePlate(value) {
+        return /^[A-Z0-9]{2,20}$/.test(normalizePlate(value));
+    }
+
+    function getPlateFromKeyedObject(value, depth = 0) {
+        if (!value || typeof value !== 'object' || depth > 3) return '';
+
+        for (const [key, candidate] of Object.entries(value)) {
+            const isPlateKey =
+                /^(?:plate|reg(?:istration)?(?:no|number)?|licensePlate|licencePlate)$/i.test(key) ||
+                /(?:license|licence|registration).*(?:plate|number)/i.test(key);
+
+            if (
+                isPlateKey &&
+                (typeof candidate === 'string' || typeof candidate === 'number') &&
+                isPlausiblePlate(candidate)
+            ) {
+                return normalizePlate(candidate);
+            }
+        }
+
+        for (const candidate of Object.values(value)) {
+            if (!candidate || typeof candidate !== 'object') continue;
+
+            const nestedPlate = getPlateFromKeyedObject(candidate, depth + 1);
+
+            if (nestedPlate) return nestedPlate;
+        }
+
+        return '';
+    }
+
+    function getRequestUrl(resource) {
+        if (typeof resource === 'string') return resource;
+        if (resource instanceof URL) return resource.href;
+        return String(resource?.url || '');
+    }
+
+    function getPlateFromRequest(urlValue, body) {
+        try {
+            const url = new URL(urlValue, location.href);
+
+            for (const [key, value] of url.searchParams.entries()) {
+                const plate = getPlateFromKeyedObject({ [key]: value });
+                if (plate) return plate;
+            }
+        } catch {
+            // A relative or malformed URL can still have a useful request body.
+        }
+
+        if (body && typeof body.entries === 'function') {
+            try {
+                for (const [key, value] of body.entries()) {
+                    const plate = getPlateFromKeyedObject({ [key]: value });
+                    if (plate) return plate;
+                }
+            } catch {
+                // Fall through to other supported body representations.
+            }
+        }
+
+        if (body && typeof body === 'object') {
+            const objectPlate = getPlateFromKeyedObject(body);
+            if (objectPlate) return objectPlate;
+        }
+
+        if (typeof body !== 'string' || body.length > MAX_REQUEST_BODY_CHARS) {
+            return '';
+        }
+
+        try {
+            const parsedBody = JSON.parse(body);
+            const jsonPlate = getPlateFromKeyedObject(parsedBody);
+            if (jsonPlate) return jsonPlate;
+        } catch {
+            // The body may be URL-encoded instead of JSON.
+        }
+
+        try {
+            const parameters = new URLSearchParams(body);
+
+            for (const [key, value] of parameters.entries()) {
+                const plate = getPlateFromKeyedObject({ [key]: value });
+                if (plate) return plate;
+            }
+        } catch {
+            // Ignore unsupported request-body formats.
+        }
+
+        return '';
+    }
+
+    function createNetworkRequestContext(resource, body) {
+        const url = getRequestUrl(resource);
+
+        return {
+            sequence: ++networkRequestSequence,
+            url,
+            requestedPlate: getPlateFromRequest(url, body)
+        };
+    }
+
     function looksLikeParkingObject(obj) {
         if (!obj || typeof obj !== 'object') return false;
 
@@ -811,23 +990,39 @@
         return uniqueEntries;
     }
 
-    function buildParkingDataFromResponse(data) {
-        const allParkings = extractParkingEntries(data);
+    function buildParkingDataFromResponse(data, requestContext = {}) {
+        const locations = getRecognizedLocations(data, requestContext);
 
-        if (!allParkings.length) {
+        if (!locations) {
             return null;
         }
 
-        const visiblePlate = getVisiblePlateFromPage();
+        const allParkings = extractParkingEntries(locations);
+        const requestedPlate = normalizePlate(requestContext.requestedPlate);
+
+        if (!allParkings.length) {
+            return {
+                licensePlate:
+                    isPlausiblePlate(requestedPlate) ? requestedPlate : '',
+                parkings: []
+            };
+        }
+
         const commonPlate = getMostCommonPlate(allParkings);
-        const visiblePlateExistsInResponse =
-            visiblePlate &&
+        const requestedPlateExistsInResponse =
+            requestedPlate &&
             allParkings.some(parking => {
-                return normalizePlate(parking.licensePlate) === visiblePlate;
+                return normalizePlate(parking.licensePlate) === requestedPlate;
             });
+        const uniquePlates = Array.from(new Set(
+            allParkings
+                .map(parking => normalizePlate(parking.licensePlate))
+                .filter(Boolean)
+        ));
 
         const selectedPlate =
-            (visiblePlateExistsInResponse ? visiblePlate : '') ||
+            (requestedPlateExistsInResponse ? requestedPlate : '') ||
+            (uniquePlates.length === 1 ? uniquePlates[0] : '') ||
             commonPlate ||
             normalizePlate(allParkings[0].licensePlate);
 
@@ -845,22 +1040,32 @@
         };
     }
 
-    function processResponse(text) {
+    function processResponse(text, requestContext = {}) {
         if (
             !text ||
             typeof text !== 'string' ||
             text.length > MAX_JSON_RESPONSE_CHARS
         ) {
-            return;
+            return false;
         }
 
         try {
             const data = JSON.parse(text);
-            const parsed = buildParkingDataFromResponse(data);
+            const parsed = buildParkingDataFromResponse(data, requestContext);
 
             if (!parsed) {
-                return;
+                return false;
             }
+
+            const responseSequence = Number.isFinite(requestContext.sequence)
+                ? requestContext.sequence
+                : ++networkRequestSequence;
+
+            if (responseSequence < latestAcceptedResponseSequence) {
+                return false;
+            }
+
+            latestAcceptedResponseSequence = responseSequence;
 
             parsed.savedAt = Date.now();
             latestData = parsed;
@@ -869,11 +1074,15 @@
             storeParkingData(parsed);
 
             if (isParkingPage()) {
+                insertData(parsed);
                 setTimeout(retryInject, 300);
             }
 
+            return true;
+
         } catch {
             // Ignore non-JSON responses
+            return false;
         }
     }
 
@@ -993,21 +1202,63 @@
      * NETWORK HOOKS
      ************************************************************/
 
-    function shouldInspectNetworkResponse(requestStartedInWorkflow) {
-        return requestStartedInWorkflow && isParkingSearchWorkflowPage();
+    function shouldInspectNetworkResponse(
+        requestStartedInWorkflow,
+        status,
+        contentType
+    ) {
+        if (!requestStartedInWorkflow || !isParkingSearchWorkflowPage()) {
+            return false;
+        }
+
+        if (
+            Number.isFinite(status) &&
+            status !== 0 &&
+            (status < 200 || status >= 300)
+        ) {
+            return false;
+        }
+
+        const normalizedType = String(contentType || '').toLowerCase();
+
+        if (
+            normalizedType &&
+            !normalizedType.includes('/json') &&
+            !normalizedType.includes('+json') &&
+            !normalizedType.includes('text/plain')
+        ) {
+            return false;
+        }
+
+        return true;
     }
 
     function hookFetch() {
         const originalFetch = window.fetch;
 
+        if (typeof originalFetch !== 'function') return;
+
         window.fetch = async function (...args) {
             const requestStartedInWorkflow =
                 isParkingSearchWorkflowPage();
+            const requestContext = requestStartedInWorkflow
+                ? createNetworkRequestContext(args[0], args[1]?.body)
+                : null;
             const response = await originalFetch.apply(this, args);
 
             try {
-                if (shouldInspectNetworkResponse(requestStartedInWorkflow)) {
-                    response.clone().text().then(processResponse).catch(() => {});
+                const contentType = response.headers?.get?.('content-type');
+
+                if (
+                    shouldInspectNetworkResponse(
+                        requestStartedInWorkflow,
+                        response.status,
+                        contentType
+                    )
+                ) {
+                    response.clone().text()
+                        .then(text => processResponse(text, requestContext))
+                        .catch(() => {});
                 }
             } catch {
                 // Ignore responses that cannot be cloned.
@@ -1020,22 +1271,58 @@
 
     function hookXMLHttpRequest() {
         const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSend = XMLHttpRequest.prototype.send;
+        const requestContextKey = Symbol('tmParkingRequestContext');
+        const listenerInstalledKey = Symbol('tmParkingListenerInstalled');
 
         XMLHttpRequest.prototype.open = function (...args) {
             const requestStartedInWorkflow =
                 isParkingSearchWorkflowPage();
 
-            this.addEventListener('load', function () {
-                try {
-                    if (shouldInspectNetworkResponse(requestStartedInWorkflow)) {
-                        processResponse(this.responseText);
+            this[requestContextKey] = requestStartedInWorkflow
+                ? createNetworkRequestContext(args[1], null)
+                : null;
+
+            if (!this[listenerInstalledKey]) {
+                this[listenerInstalledKey] = true;
+
+                this.addEventListener('load', function () {
+                    try {
+                        const context = this[requestContextKey];
+                        const contentType = this.getResponseHeader?.(
+                            'content-type'
+                        );
+
+                        if (
+                            context &&
+                            shouldInspectNetworkResponse(
+                                true,
+                                this.status,
+                                contentType
+                            )
+                        ) {
+                            processResponse(this.responseText, context);
+                        }
+                    } catch {
+                        // Ignore non-text responses.
                     }
-                } catch {
-                    // Ignore non-text responses.
-                }
-            });
+                });
+            }
 
             return originalOpen.apply(this, args);
+        };
+
+        XMLHttpRequest.prototype.send = function (body) {
+            const context = this[requestContextKey];
+
+            if (context && !context.requestedPlate) {
+                context.requestedPlate = getPlateFromRequest(
+                    context.url,
+                    body
+                );
+            }
+
+            return originalSend.call(this, body);
         };
 
     }
@@ -1390,16 +1677,6 @@
         window.addEventListener('hashchange', handleNavigationChange);
     }
 
-    function startNavigationObserver() {
-        const observer = new MutationObserver(handleNavigationChange);
-
-        observer.observe(document, {
-            subtree: true,
-            childList: true
-        });
-
-    }
-
     /************************************************************
      * STARTUP
      ************************************************************/
@@ -1419,7 +1696,6 @@
     hookFetch();
     hookXMLHttpRequest();
     hookHistoryNavigation();
-    startNavigationObserver();
     
 
     if (document.readyState === 'loading') {

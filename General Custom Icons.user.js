@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Custom Icons
 // @namespace    https://nidushan.com
-// @version      2.4
+// @version      2.4.1
 // @description  Custom tab titles and persistent favicons for PassPay and PayManager pages
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -17,6 +17,15 @@
 
 (function () {
     'use strict';
+
+    const INSTANCE_KEY = '__generalCustomIconsInitialized';
+    const HISTORY_PATCH_KEY = '__generalCustomIconsHistoryPatched';
+
+    if (window[INSTANCE_KEY]) return;
+    window[INSTANCE_KEY] = true;
+
+    const HEAD_WAIT_TIMEOUT_MS = 10 * 1000;
+    const ROUTE_SETTLE_MS = 150;
 
     const PAGE_CONFIG = [
         {
@@ -90,8 +99,7 @@
             pathRegex: /^\/files(\/|$)/,
             title: 'Files',
             emoji: '📂'
-        }
-        ,
+        },
         {
             host: 'paymanager.logos.dk',
             pathRegex: /^\/user_administration(\/|$)/,
@@ -100,19 +108,62 @@
         }
     ];
 
+    const nativeTitlesByPath = new Map();
+
     let currentConfig = null;
     let currentFaviconHref = null;
-    let titleInterval = null;
-    let faviconInterval = null;
-    let headObserver = null;
+    let defaultNativeTitle = '';
     let lastUrl = location.href;
     let lastAppliedKey = '';
+    let observedHead = null;
+    let headObserver = null;
+    let documentObserver = null;
+    let headWaitObserver = null;
+    let headWaitTimer = null;
+    const pendingHeadCallbacks = [];
+    let routeTimer = null;
 
     function getConfigForCurrentPage() {
         return PAGE_CONFIG.find(config =>
             location.hostname === config.host &&
             config.pathRegex.test(location.pathname)
-        );
+        ) || null;
+    }
+
+    function getRouteKey() {
+        return `${location.hostname}${location.pathname}`;
+    }
+
+    function rememberNativeTitle(forcedConfig = currentConfig) {
+        const title = document.title;
+
+        if (!title || (forcedConfig && title === forcedConfig.title)) return;
+
+        nativeTitlesByPath.set(getRouteKey(), title);
+
+        if (!defaultNativeTitle) {
+            defaultNativeTitle = title;
+        }
+    }
+
+    function clearHeadWait() {
+        if (headWaitObserver) {
+            headWaitObserver.disconnect();
+            headWaitObserver = null;
+        }
+
+        if (headWaitTimer !== null) {
+            clearTimeout(headWaitTimer);
+            headWaitTimer = null;
+        }
+    }
+
+    function finishHeadWait(found) {
+        const callbacks = pendingHeadCallbacks.splice(0);
+
+        clearHeadWait();
+
+        if (found) callbacks.forEach(callback => callback());
     }
 
     function whenHeadReady(callback) {
@@ -121,12 +172,22 @@
             return;
         }
 
-        const interval = setInterval(() => {
-            if (document.head) {
-                clearInterval(interval);
-                callback();
-            }
-        }, 50);
+        pendingHeadCallbacks.push(callback);
+
+        if (headWaitObserver) return;
+
+        headWaitObserver = new MutationObserver(() => {
+            if (document.head) finishHeadWait(true);
+        });
+
+        headWaitObserver.observe(document, {
+            childList: true,
+            subtree: true
+        });
+
+        headWaitTimer = window.setTimeout(() => {
+            finishHeadWait(Boolean(document.head));
+        }, HEAD_WAIT_TIMEOUT_MS);
     }
 
     function createEmojiSvgFavicon(emoji) {
@@ -178,187 +239,210 @@
     function faviconIsCorrect() {
         if (!currentFaviconHref) return false;
 
-        const icons = document.querySelectorAll(
-            'link[rel~="icon"]'
-        );
+        const customIcons = Array.from(document.querySelectorAll(
+            'link[data-userscript-favicon="true"]'
+        ));
 
-        if (!icons.length) return false;
+        if (
+            customIcons.length !== 3 ||
+            customIcons.some(
+                icon => icon.getAttribute('href') !== currentFaviconHref
+            )
+        ) {
+            return false;
+        }
 
+        const icons = document.querySelectorAll('link[rel~="icon"]');
         const lastIcon = icons[icons.length - 1];
 
-        return (
+        return Boolean(
+            lastIcon &&
             lastIcon.dataset.userscriptFavicon === 'true' &&
-            lastIcon.href === currentFaviconHref
+            lastIcon.getAttribute('href') === currentFaviconHref
         );
     }
 
-    function enforceFavicon(config) {
-        if (!config) return;
+    function enforceCurrentSettings() {
+        if (!currentConfig || !document.head) return;
 
-        whenHeadReady(() => {
-            applyFavicon(config);
+        if (document.title !== currentConfig.title) {
+            document.title = currentConfig.title;
+        }
 
-            if (headObserver) {
-                headObserver.disconnect();
-            }
-
-            headObserver = new MutationObserver(() => {
-                if (!faviconIsCorrect()) {
-                    applyFavicon(config);
-                }
-            });
-
-            headObserver.observe(document.head, {
-                childList: true,
-                subtree: true
-            });
-
-            if (faviconInterval) {
-                clearInterval(faviconInterval);
-            }
-
-            let attempts = 0;
-
-            faviconInterval = setInterval(() => {
-                attempts++;
-
-                if (!faviconIsCorrect()) {
-                    applyFavicon(config);
-                }
-
-                if (attempts >= 40) {
-                    clearInterval(faviconInterval);
-
-                    faviconInterval = setInterval(() => {
-                        if (currentConfig && !faviconIsCorrect()) {
-                            applyFavicon(currentConfig);
-                        }
-                    }, 10000);
-                }
-            }, 500);
-        });
+        if (!faviconIsCorrect()) {
+            applyFavicon(currentConfig);
+        }
     }
 
-    function applyTitle(config) {
-        if (!config) return;
-
-        document.title = config.title;
-
-        if (titleInterval) {
-            clearInterval(titleInterval);
-        }
-
-        let attempts = 0;
-
-        titleInterval = setInterval(() => {
-            attempts++;
-
-            if (document.title !== config.title) {
-                document.title = config.title;
-            }
-
-            if (attempts >= 60) {
-                clearInterval(titleInterval);
-
-                titleInterval = setInterval(() => {
-                    if (
-                        currentConfig &&
-                        document.title !== currentConfig.title
-                    ) {
-                        document.title = currentConfig.title;
-                    }
-                }, 5000);
-            }
-        }, 500);
-    }
-
-    function stopEnforcement() {
-        if (titleInterval) {
-            clearInterval(titleInterval);
-            titleInterval = null;
-        }
-
-        if (faviconInterval) {
-            clearInterval(faviconInterval);
-            faviconInterval = null;
-        }
-
+    function disconnectHeadObserver() {
         if (headObserver) {
             headObserver.disconnect();
             headObserver = null;
         }
 
-        currentFaviconHref = null;
-        removeCustomFavicons();
+        observedHead = null;
     }
 
-    function applySettings() {
+    function observeCurrentHead() {
+        if (!document.head) return;
+
+        disconnectHeadObserver();
+        observedHead = document.head;
+
+        headObserver = new MutationObserver(() => {
+            if (!currentConfig) return;
+
+            rememberNativeTitle(currentConfig);
+            enforceCurrentSettings();
+        });
+
+        headObserver.observe(document.head, {
+            attributes: true,
+            attributeFilter: [
+                'data-userscript-favicon',
+                'href',
+                'rel'
+            ],
+            childList: true,
+            characterData: true,
+            subtree: true
+        });
+    }
+
+    function observeHeadReplacement() {
+        if (!document.documentElement) return;
+
+        if (documentObserver) {
+            documentObserver.disconnect();
+        }
+
+        documentObserver = new MutationObserver(() => {
+            if (!currentConfig || document.head === observedHead) return;
+
+            whenHeadReady(() => {
+                observeCurrentHead();
+                enforceCurrentSettings();
+            });
+        });
+
+        documentObserver.observe(document.documentElement, {
+            childList: true
+        });
+    }
+
+    function stopEnforcement(previousConfig) {
+        disconnectHeadObserver();
+        currentFaviconHref = null;
+        removeCustomFavicons();
+
+        if (previousConfig && document.title === previousConfig.title) {
+            document.title =
+                nativeTitlesByPath.get(getRouteKey()) ||
+                defaultNativeTitle ||
+                '';
+        }
+    }
+
+    function applySettings(force = false) {
         const config = getConfigForCurrentPage();
+        const key = config
+            ? `${location.hostname}${location.pathname}|${config.title}`
+            : '';
 
         if (!config) {
             if (currentConfig) {
-                stopEnforcement();
+                const previousConfig = currentConfig;
+
+                currentConfig = null;
+                lastAppliedKey = '';
+                stopEnforcement(previousConfig);
+            }
+            return;
+        }
+
+        if (key !== lastAppliedKey) {
+            rememberNativeTitle(currentConfig);
+            currentConfig = config;
+            lastAppliedKey = key;
+        }
+
+        whenHeadReady(() => {
+            if (force || document.head !== observedHead || !headObserver) {
+                observeCurrentHead();
             }
 
-            currentConfig = null;
-            lastAppliedKey = '';
-            return;
+            enforceCurrentSettings();
+        });
+    }
+
+    function scheduleApplySettings(delay = ROUTE_SETTLE_MS, force = false) {
+        if (routeTimer !== null) {
+            clearTimeout(routeTimer);
         }
 
-        const key = `${location.pathname}|${config.title}`;
-
-        if (key === lastAppliedKey) {
-            return;
-        }
-
-        lastAppliedKey = key;
-        currentConfig = config;
-
-        applyTitle(config);
-        enforceFavicon(config);
+        routeTimer = window.setTimeout(() => {
+            routeTimer = null;
+            applySettings(force);
+        }, delay);
     }
 
     function handleUrlChange() {
-        if (location.href === lastUrl) {
-            return;
-        }
+        if (location.href === lastUrl) return;
 
         lastUrl = location.href;
-
-        setTimeout(() => {
-            applySettings();
-        }, 150);
+        scheduleApplySettings();
     }
 
     function hookHistoryNavigation() {
-        const originalPushState = history.pushState;
-        const originalReplaceState = history.replaceState;
+        if (history[HISTORY_PATCH_KEY]) return;
 
-        history.pushState = function () {
-            const result = originalPushState.apply(this, arguments);
+        history[HISTORY_PATCH_KEY] = true;
 
-            setTimeout(handleUrlChange, 50);
+        for (const methodName of ['pushState', 'replaceState']) {
+            const originalMethod = history[methodName];
 
-            return result;
-        };
+            history[methodName] = function () {
+                const result = originalMethod.apply(this, arguments);
 
-        history.replaceState = function () {
-            const result = originalReplaceState.apply(this, arguments);
+                handleUrlChange();
+                return result;
+            };
+        }
 
-            setTimeout(handleUrlChange, 50);
+        window.addEventListener('popstate', handleUrlChange);
+        window.addEventListener('hashchange', handleUrlChange);
+    }
 
-            return result;
-        };
+    function suspendEnforcement() {
+        if (routeTimer !== null) {
+            clearTimeout(routeTimer);
+            routeTimer = null;
+        }
 
-        window.addEventListener('popstate', () => {
-            setTimeout(handleUrlChange, 50);
-        });
+        clearHeadWait();
+        pendingHeadCallbacks.length = 0;
+        disconnectHeadObserver();
+
+        if (documentObserver) {
+            documentObserver.disconnect();
+            documentObserver = null;
+        }
     }
 
     hookHistoryNavigation();
 
     whenHeadReady(() => {
-        applySettings();
+        rememberNativeTitle(null);
+        observeHeadReplacement();
+        applySettings(true);
+    });
+
+    window.addEventListener('pagehide', suspendEnforcement);
+    window.addEventListener('pageshow', () => {
+        whenHeadReady(() => {
+            observeHeadReplacement();
+            applySettings(true);
+        });
     });
 
 })();

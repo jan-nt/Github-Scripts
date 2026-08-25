@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Background Session Keeper
 // @namespace    https://nidushan.com
-// @version      3.2
+// @version      3.2.1
 // @description  Keeps DIBS and Riverty sessions active and resumes login when their login pages appear
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -18,12 +18,16 @@
 (function () {
     'use strict';
 
+    const INSTANCE_KEY = '__generalBackgroundSessionKeeperInitialized';
+
+    if (window[INSTANCE_KEY]) return;
+    window[INSTANCE_KEY] = true;
+
     const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
     const ACTIVE_RETRY_MS = 30 * 1000;
     const LOGIN_RETRY_MS = 1000;
     const LOGIN_WAIT_MS = 30 * 1000;
-    const LOGIN_CLICK_RETRY_MS = 15 * 1000;
-    const MAX_LOGIN_CLICKS = 3;
+    const LOGIN_COOLDOWN_MS = 5 * 60 * 1000;
     const ONLY_REFRESH_IN_BACKGROUND = true;
 
     const STORAGE_KEY = 'general_session_keeper_next_refresh_v3';
@@ -46,16 +50,14 @@
                 ),
             buttonXPath: '/html/body/form/div[2]/table/tbody/tr[2]/td[3]/table/tbody/tr[2]/td[2]/div/div/table/tbody/tr/td[2]/table/tbody/tr[3]/td/input',
             fallbackSelectors: [
-                'form input[type="submit"]',
-                'form input[type="button"]'
+                'form input[type="submit"]'
             ]
         }
     ];
 
     let refreshTimer = null;
     let loginTimer = null;
-    let loginClicked = false;
-    let loginClickAttempts = 0;
+    let loginAttempted = false;
     let loginRefreshReset = false;
     let memoryNextRefreshTime = null;
 
@@ -79,55 +81,167 @@
         }
     }
 
-    function findLoginButton(page) {
-        const xpathButton = getElementByXPath(page.buttonXPath);
-
-        if (xpathButton) return xpathButton;
-
-        for (const selector of page.fallbackSelectors) {
-            const button = document.querySelector(selector);
-            if (button) return button;
+    function elementIsVisible(element) {
+        if (!element || !element.isConnected || element.hidden) return false;
+        if (element.disabled || element.getAttribute('aria-disabled') === 'true') {
+            return false;
         }
 
-        return null;
+        try {
+            const style = window.getComputedStyle(element);
+
+            if (
+                style &&
+                (style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    style.visibility === 'collapse')
+            ) {
+                return false;
+            }
+        } catch {
+            // Visibility can still be checked from layout information below.
+        }
+
+        return (
+            typeof element.getClientRects !== 'function' ||
+            element.getClientRects().length > 0
+        );
+    }
+
+    function loginControlIsReady(element) {
+        if (!elementIsVisible(element)) return false;
+
+        const tagName = element.tagName?.toLowerCase();
+        const type = (element.getAttribute('type') || '').toLowerCase();
+        const isSubmitButton =
+            tagName === 'button' && (type === '' || type === 'submit');
+        const isSubmitInput =
+            tagName === 'input' && (type === 'submit' || type === 'button');
+
+        if (!isSubmitButton && !isSubmitInput) return false;
+
+        const form = element.form || element.closest?.('form');
+
+        if (!form) return false;
+
+        try {
+            if (typeof form.checkValidity === 'function' && !form.checkValidity()) {
+                return false;
+            }
+        } catch {
+            return false;
+        }
+
+        const requiredInputs = form.querySelectorAll?.(
+            'input[required]:not([type="hidden"]):not([disabled])'
+        ) || [];
+
+        return Array.from(requiredInputs).every(input =>
+            input.type === 'checkbox' || input.type === 'radio'
+                ? input.checked
+                : String(input.value || '').trim() !== ''
+        );
+    }
+
+    function findLoginButton(page) {
+        const candidates = new Set();
+        const xpathButton = getElementByXPath(page.buttonXPath);
+
+        if (xpathButton) candidates.add(xpathButton);
+
+        for (const selector of page.fallbackSelectors) {
+            try {
+                document.querySelectorAll(selector).forEach(candidate => {
+                    candidates.add(candidate);
+                });
+            } catch {
+                // Ignore a site selector that is no longer valid.
+            }
+        }
+
+        const validCandidates = Array.from(candidates).filter(
+            loginControlIsReady
+        );
+
+        return validCandidates.length === 1 ? validCandidates[0] : null;
+    }
+
+    function clearLoginTimer() {
+        if (loginTimer === null) return;
+
+        clearTimeout(loginTimer);
+        loginTimer = null;
+    }
+
+    function scheduleLoginRecoveryReload() {
+        clearLoginTimer();
+
+        loginTimer = window.setTimeout(() => {
+            loginTimer = null;
+
+            if (!getLoginPage()) {
+                resumeRefreshAfterLogin();
+                return;
+            }
+
+            location.reload();
+        }, LOGIN_COOLDOWN_MS);
     }
 
     function tryLogin(page) {
+        if (loginAttempted) return;
+
         const deadline = Date.now() + LOGIN_WAIT_MS;
 
         function attempt() {
             loginTimer = null;
 
-            if (loginClicked) return;
+            if (loginAttempted) return;
+
+            const currentPage = getLoginPage();
+
+            if (!currentPage) {
+                resumeRefreshAfterLogin();
+                return;
+            }
+
+            if (currentPage !== page) return;
 
             const button = findLoginButton(page);
 
-            if (button && !button.disabled) {
-                loginClicked = true;
-                loginClickAttempts++;
-                button.click();
+            if (button) {
+                loginAttempted = true;
 
-                loginTimer = window.setTimeout(() => {
-                    loginTimer = null;
+                try {
+                    button.click();
+                } catch {
+                    // Reloading later is safer than repeatedly submitting the
+                    // same form after a failed programmatic click.
+                }
 
-                    if (!getLoginPage()) return;
-                    if (loginClickAttempts >= MAX_LOGIN_CLICKS) return;
-
-                    loginClicked = false;
-                    checkRefresh();
-                }, LOGIN_CLICK_RETRY_MS);
-
+                scheduleLoginRecoveryReload();
                 return;
             }
 
             if (Date.now() < deadline) {
                 loginTimer = window.setTimeout(attempt, LOGIN_RETRY_MS);
             } else {
-                scheduleCheck(ACTIVE_RETRY_MS);
+                scheduleLoginRecoveryReload();
             }
         }
 
         attempt();
+    }
+
+    function resetLoginState() {
+        clearLoginTimer();
+        loginAttempted = false;
+        loginRefreshReset = false;
+    }
+
+    function resumeRefreshAfterLogin() {
+        resetLoginState();
+        scheduleCheck(0);
     }
 
     function readNextRefreshTime() {
@@ -175,12 +289,13 @@
             clearTimeout(refreshTimer);
         }
 
-        refreshTimer = window.setTimeout(checkRefresh, Math.max(0, delay));
+        refreshTimer = window.setTimeout(() => {
+            refreshTimer = null;
+            checkRefresh();
+        }, Math.max(0, delay));
     }
 
     function checkRefresh() {
-        refreshTimer = null;
-
         const loginPage = getLoginPage();
 
         if (loginPage) {
@@ -189,10 +304,18 @@
                 loginRefreshReset = true;
             }
 
-            if (loginTimer === null && !loginClicked) {
+            if (loginTimer === null && !loginAttempted) {
                 tryLogin(loginPage);
             }
             return;
+        }
+
+        if (
+            loginTimer !== null ||
+            loginAttempted ||
+            loginRefreshReset
+        ) {
+            resetLoginState();
         }
 
         const nextRefreshTime = getNextRefreshTime();
@@ -212,14 +335,27 @@
         scheduleCheck(Math.min(remaining, 60 * 1000));
     }
 
-    document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            checkRefresh();
+    function clearTimers() {
+        if (refreshTimer !== null) {
+            clearTimeout(refreshTimer);
+            refreshTimer = null;
         }
+
+        clearLoginTimer();
+        loginAttempted = false;
+    }
+
+    function wakeSessionKeeper() {
+        scheduleCheck(0);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) wakeSessionKeeper();
     });
 
-    window.addEventListener('pageshow', checkRefresh);
+    window.addEventListener('pageshow', wakeSessionKeeper);
+    window.addEventListener('pagehide', clearTimers);
 
-    checkRefresh();
+    wakeSessionKeeper();
 
 })();
