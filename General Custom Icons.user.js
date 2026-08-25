@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Custom Icons
 // @namespace    https://nidushan.com
-// @version      2.4.1
+// @version      2.5.0
 // @description  Custom tab titles and persistent favicons for PassPay and PayManager pages
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -26,6 +26,9 @@
 
     const HEAD_WAIT_TIMEOUT_MS = 10 * 1000;
     const ROUTE_SETTLE_MS = 150;
+    const FAVICON_MARKER = 'data-userscript-favicon';
+    const DISABLED_ICON_MARKER = 'data-userscript-favicon-disabled';
+    const ORIGINAL_REL_ATTRIBUTE = 'data-userscript-favicon-original-rel';
 
     const PAGE_CONFIG = [
         {
@@ -121,17 +124,29 @@
     let headWaitObserver = null;
     let headWaitTimer = null;
     const pendingHeadCallbacks = [];
+    const failedFaviconHrefs = new Set();
+    const faviconErrorBoundLinks = new WeakSet();
     let routeTimer = null;
 
+    function normalizePathname(pathname = location.pathname) {
+        const normalized = String(pathname || '/')
+            .replace(/\/{2,}/g, '/')
+            .replace(/\/+$/, '');
+
+        return normalized || '/';
+    }
+
     function getConfigForCurrentPage() {
+        const pathname = normalizePathname();
+
         return PAGE_CONFIG.find(config =>
             location.hostname === config.host &&
-            config.pathRegex.test(location.pathname)
+            config.pathRegex.test(pathname)
         ) || null;
     }
 
     function getRouteKey() {
-        return `${location.hostname}${location.pathname}`;
+        return `${location.hostname}${normalizePathname()}`;
     }
 
     function rememberNativeTitle(forcedConfig = currentConfig) {
@@ -204,22 +219,97 @@
 
     function removeCustomFavicons() {
         document.querySelectorAll(
-            'link[data-userscript-favicon="true"]'
+            `link[${FAVICON_MARKER}="true"]`
         ).forEach(link => link.remove());
     }
 
-    function addFavicon(rel, href) {
-        const link = document.createElement('link');
+    function isIconRelationship(rel) {
+        const tokens = String(rel || '')
+            .trim()
+            .toLowerCase()
+            .split(/\s+/)
+            .filter(Boolean);
 
-        link.rel = rel;
-        link.href = href;
+        return tokens.includes('icon') ||
+            tokens.includes('apple-touch-icon') ||
+            tokens.includes('apple-touch-icon-precomposed') ||
+            tokens.includes('mask-icon');
+    }
 
-        if (rel === 'icon' || rel === 'shortcut icon') {
-            link.type = 'image/svg+xml';
+    function neutralizeConflictingFavicons() {
+        if (!document.head) return;
+
+        document.querySelectorAll('link[rel]').forEach(link => {
+            if (link.getAttribute(FAVICON_MARKER) === 'true') return;
+
+            const rel = link.getAttribute('rel');
+            if (!isIconRelationship(rel)) return;
+
+            if (!link.hasAttribute(ORIGINAL_REL_ATTRIBUTE)) {
+                link.setAttribute(ORIGINAL_REL_ATTRIBUTE, rel);
+            }
+
+            link.setAttribute(DISABLED_ICON_MARKER, 'true');
+            link.removeAttribute('rel');
+        });
+    }
+
+    function restoreConflictingFavicons() {
+        document.querySelectorAll(
+            `link[${DISABLED_ICON_MARKER}="true"]`
+        ).forEach(link => {
+            const originalRel = link.getAttribute(ORIGINAL_REL_ATTRIBUTE);
+
+            if (!link.hasAttribute('rel') && originalRel) {
+                link.setAttribute('rel', originalRel);
+            }
+
+            link.removeAttribute(DISABLED_ICON_MARKER);
+            link.removeAttribute(ORIGINAL_REL_ATTRIBUTE);
+        });
+    }
+
+    function reportFaviconFailure(href) {
+        if (failedFaviconHrefs.has(href)) return;
+
+        failedFaviconHrefs.add(href);
+        window.console?.warn?.(
+            '[General Custom Icons] The configured favicon could not be loaded.'
+        );
+    }
+
+    function handleFaviconError(event) {
+        const link = event.currentTarget;
+        const href = link?.getAttribute('href') || '';
+
+        if (!href || href !== currentFaviconHref) return;
+
+        reportFaviconFailure(href);
+        currentFaviconHref = null;
+        link.remove();
+        restoreConflictingFavicons();
+    }
+
+    function getCanonicalFavicon() {
+        const managedIcons = Array.from(document.querySelectorAll(
+            `link[${FAVICON_MARKER}="true"]`
+        ));
+        let canonical = managedIcons.shift() || null;
+
+        managedIcons.forEach(link => link.remove());
+
+        if (!canonical) {
+            canonical = document.createElement('link');
+            canonical.setAttribute(FAVICON_MARKER, 'true');
+            document.head.appendChild(canonical);
         }
 
-        link.setAttribute('data-userscript-favicon', 'true');
-        document.head.appendChild(link);
+        if (!faviconErrorBoundLinks.has(canonical)) {
+            canonical.addEventListener('error', handleFaviconError);
+            faviconErrorBoundLinks.add(canonical);
+        }
+
+        return canonical;
     }
 
     function applyFavicon(config) {
@@ -227,38 +317,50 @@
 
         const href = createEmojiSvgFavicon(config.emoji);
 
+        if (failedFaviconHrefs.has(href)) return;
+
         currentFaviconHref = href;
+        neutralizeConflictingFavicons();
 
-        removeCustomFavicons();
+        const canonical = getCanonicalFavicon();
 
-        addFavicon('icon', href);
-        addFavicon('shortcut icon', href);
-        addFavicon('apple-touch-icon', href);
+        if (canonical.getAttribute('rel') !== 'icon') {
+            canonical.setAttribute('rel', 'icon');
+        }
+
+        if (canonical.getAttribute('type') !== 'image/svg+xml') {
+            canonical.setAttribute('type', 'image/svg+xml');
+        }
+
+        if (canonical.getAttribute('sizes') !== 'any') {
+            canonical.setAttribute('sizes', 'any');
+        }
+
+        if (canonical.getAttribute('href') !== href) {
+            canonical.setAttribute('href', href);
+        }
     }
 
     function faviconIsCorrect() {
         if (!currentFaviconHref) return false;
 
         const customIcons = Array.from(document.querySelectorAll(
-            'link[data-userscript-favicon="true"]'
+            `link[${FAVICON_MARKER}="true"]`
         ));
 
         if (
-            customIcons.length !== 3 ||
-            customIcons.some(
-                icon => icon.getAttribute('href') !== currentFaviconHref
-            )
+            customIcons.length !== 1 ||
+            customIcons[0].getAttribute('href') !== currentFaviconHref ||
+            customIcons[0].getAttribute('rel') !== 'icon' ||
+            customIcons[0].getAttribute('type') !== 'image/svg+xml'
         ) {
             return false;
         }
 
-        const icons = document.querySelectorAll('link[rel~="icon"]');
-        const lastIcon = icons[icons.length - 1];
-
-        return Boolean(
-            lastIcon &&
-            lastIcon.dataset.userscriptFavicon === 'true' &&
-            lastIcon.getAttribute('href') === currentFaviconHref
+        return !Array.from(document.querySelectorAll('link[rel]')).some(
+            link =>
+                link !== customIcons[0] &&
+                isIconRelationship(link.getAttribute('rel'))
         );
     }
 
@@ -299,7 +401,9 @@
         headObserver.observe(document.head, {
             attributes: true,
             attributeFilter: [
-                'data-userscript-favicon',
+                FAVICON_MARKER,
+                DISABLED_ICON_MARKER,
+                ORIGINAL_REL_ATTRIBUTE,
                 'href',
                 'rel'
             ],
@@ -334,6 +438,7 @@
         disconnectHeadObserver();
         currentFaviconHref = null;
         removeCustomFavicons();
+        restoreConflictingFavicons();
 
         if (previousConfig && document.title === previousConfig.title) {
             document.title =
@@ -346,7 +451,7 @@
     function applySettings(force = false) {
         const config = getConfigForCurrentPage();
         const key = config
-            ? `${location.hostname}${location.pathname}|${config.title}`
+            ? `${getRouteKey()}|${config.title}|${config.emoji}`
             : '';
 
         if (!config) {
@@ -364,6 +469,7 @@
             rememberNativeTitle(currentConfig);
             currentConfig = config;
             lastAppliedKey = key;
+            currentFaviconHref = null;
         }
 
         whenHeadReady(() => {

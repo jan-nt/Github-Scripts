@@ -16,8 +16,10 @@ const isolatedSource = `${scriptSource.slice(0, startupIndex)}
         addSmartSpaceRemoval,
         findAdministrationSearchInput,
         handleRemoveSpacesClick,
+        injectStyles,
         linkifyElement,
         normalizeSearchValue,
+        removeSearchButton,
         ensureObserver,
         queuePendingRoot,
         runPendingWork,
@@ -43,6 +45,23 @@ class FakeElement {
         this.dataset = {};
         this.attributes = new Map();
         this.className = '';
+        this.classList = {
+            add: (...tokens) => {
+                const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+                tokens.forEach(token => classes.add(token));
+                this.className = Array.from(classes).join(' ');
+            },
+            remove: (...tokens) => {
+                const removed = new Set(tokens);
+                this.className = this.className
+                    .split(/\s+/)
+                    .filter(token => token && !removed.has(token))
+                    .join(' ');
+            },
+            contains: token => this.className
+                .split(/\s+/)
+                .includes(token)
+        };
         this.id = '';
         this.parentNode = null;
         this.previousElementSibling = null;
@@ -278,6 +297,10 @@ class FakeParent extends FakeElement {
         this.relink();
         return node;
     }
+
+    appendChild(node) {
+        return this.insertBefore(node, null);
+    }
 }
 
 function createScenario() {
@@ -396,6 +419,16 @@ assert.equal(api.normalizeSearchValue('keep - value'), 'keep - value');
 
 assert.equal(api.findAdministrationSearchInput(), null);
 
+api.injectStyles();
+api.injectStyles();
+const injectedStyles = scenario.createdElements.filter(
+    element => element.id === 'pp-useradmin-styles'
+);
+assert.equal(injectedStyles.length, 1);
+assert.match(injectedStyles[0].textContent, /pp-useradmin-search-row/);
+assert.match(injectedStyles[0].textContent, /display:\s*flex\s*!important/);
+assert.match(injectedStyles[0].textContent, /flex-wrap:\s*wrap/);
+
 const oldInput = new FakeInput(formattedPlate);
 const decoyInput = new FakeInput('decoy');
 scenario.fallbackInputs.push(oldInput, decoyInput);
@@ -438,21 +471,42 @@ const button = scenario.createdElements.find(
 assert.ok(button);
 assert.equal(formControl.parentNode, formParent);
 assert.deepEqual(formParent.children, [formControl, button]);
+assert.equal(formParent.classList.contains('pp-useradmin-search-row'), true);
+assert.equal((button.listeners.get('click') || []).length, 1);
+
+api.addRemoveSpacesButton();
+assert.deepEqual(formParent.children, [formControl, button]);
+assert.equal((button.listeners.get('click') || []).length, 1);
 
 const currentInput = new FakeInput('C D 2');
 const currentFormControl = new FakeElement('div');
 currentInput.formControl = currentFormControl;
 searchLabel.control = currentInput;
 scenario.fallbackInputs.splice(0, 2, currentInput, decoyInput);
-formParent.children.push(currentFormControl);
-formParent.relink();
+const replacementFormParent = new FakeParent(currentFormControl);
 
 api.addRemoveSpacesButton();
 button.click();
 assert.equal(currentInput.value, 'CD2');
 assert.equal(replacementInput.value, 'AB-1');
-assert.equal(currentFormControl.parentNode, formParent);
+assert.equal(currentFormControl.parentNode, replacementFormParent);
 assert.equal(button.previousElementSibling, currentFormControl);
+assert.deepEqual(replacementFormParent.children, [currentFormControl, button]);
+assert.equal(formParent.classList.contains('pp-useradmin-search-row'), false);
+assert.equal(
+    replacementFormParent.classList.contains('pp-useradmin-search-row'),
+    true
+);
+
+api.removeSearchButton();
+assert.equal(button.parentNode, null);
+assert.equal(
+    replacementFormParent.classList.contains('pp-useradmin-search-row'),
+    false
+);
+api.addRemoveSpacesButton();
+assert.deepEqual(replacementFormParent.children, [currentFormControl, button]);
+assert.equal((button.listeners.get('click') || []).length, 1);
 
 const chainLabel = new FakeElement('p', 'ChainID');
 const chainValue = new FakeElement('p', '123456789012345678901234');
