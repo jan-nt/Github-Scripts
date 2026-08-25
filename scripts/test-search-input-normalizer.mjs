@@ -14,9 +14,19 @@ const expectedXpaths = {
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[4]/label/form/input'
 };
 
-function createScenario(pathname, initialValue = '') {
+const expectedSelectors = {
+    '/transactions': '#financial_table_filter input[type="search"]',
+    '/parking': '#parkings_table_filter input[type="search"]'
+};
+
+function createScenario(
+    pathname,
+    initialValue = '',
+    { useStableSelector = true } = {}
+) {
     const listeners = new Map();
     let evaluatedXpath = '';
+    let evaluatedSelector = '';
 
     class FakeInput {
         constructor(value) {
@@ -31,7 +41,7 @@ function createScenario(pathname, initialValue = '') {
         }
     }
 
-    const input = new FakeInput(initialValue);
+    let activeInput = new FakeInput(initialValue);
 
     const document = {
         documentElement: {},
@@ -40,25 +50,51 @@ function createScenario(pathname, initialValue = '') {
             typeListeners.push(listener);
             listeners.set(type, typeListeners);
         },
+        querySelector(selector) {
+            evaluatedSelector = selector;
+            return useStableSelector ? activeInput : null;
+        },
         evaluate(xpath) {
             evaluatedXpath = xpath;
-            return { singleNodeValue: input };
+            return { singleNodeValue: activeInput };
         }
     };
 
-    vm.runInNewContext(scriptSource, {
+    const window = {};
+    const context = vm.createContext({
         document,
+        window,
         location: { pathname },
         XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
         HTMLInputElement: FakeInput
     });
 
+    vm.runInContext(scriptSource, context);
+
     return {
-        input,
+        get input() {
+            return activeInput;
+        },
         getEvaluatedXpath: () => evaluatedXpath,
-        trigger(type, target = input, isTrusted = true) {
+        getEvaluatedSelector: () => evaluatedSelector,
+        listenerCount(type) {
+            return (listeners.get(type) || []).length;
+        },
+        replaceInput(value = '') {
+            activeInput = new FakeInput(value);
+            return activeInput;
+        },
+        rerun() {
+            vm.runInContext(scriptSource, context);
+        },
+        trigger(
+            type,
+            target = activeInput,
+            isTrusted = true,
+            isComposing = false
+        ) {
             for (const listener of listeners.get(type) || []) {
-                listener({ target, isTrusted });
+                listener({ target, isTrusted, isComposing });
             }
         }
     };
@@ -73,11 +109,16 @@ transactionScenario.trigger('input');
 assert.equal(transactionScenario.input.value, 'uf12345');
 assert.equal(transactionScenario.input.selectionStart, 7);
 assert.equal(
-    transactionScenario.getEvaluatedXpath(),
-    expectedXpaths['/transactions']
+    transactionScenario.getEvaluatedSelector(),
+    expectedSelectors['/transactions']
 );
+assert.equal(transactionScenario.getEvaluatedXpath(), '');
 
-const parkingScenario = createScenario('/parking/');
+const parkingScenario = createScenario(
+    '/parking/',
+    '',
+    { useStableSelector: false }
+);
 parkingScenario.input.value = 'AeS-123\u2013123';
 parkingScenario.input.selectionStart = 11;
 parkingScenario.input.selectionEnd = 11;
@@ -88,6 +129,10 @@ assert.equal(parkingScenario.input.selectionStart, 9);
 assert.equal(
     parkingScenario.getEvaluatedXpath(),
     expectedXpaths['/parking']
+);
+assert.equal(
+    parkingScenario.getEvaluatedSelector(),
+    expectedSelectors['/parking']
 );
 
 parkingScenario.input.value = 'XY\u00A0\u2212 9';
@@ -105,5 +150,35 @@ assert.equal(unrelatedInput.value, 'keep - this');
 parkingScenario.input.value = 'keep - synthetic';
 parkingScenario.trigger('input', parkingScenario.input, false);
 assert.equal(parkingScenario.input.value, 'keep - synthetic');
+
+const replacementScenario = createScenario('/transactions');
+const replacementInput = replacementScenario.replaceInput('ZX 12-34');
+replacementInput.selectionStart = replacementInput.value.length;
+replacementInput.selectionEnd = replacementInput.value.length;
+replacementScenario.trigger('input');
+assert.equal(replacementInput.value, 'ZX1234');
+assert.equal(replacementInput.selectionStart, 6);
+
+const compositionScenario = createScenario('/parking');
+compositionScenario.input.value = 'AB - 12';
+compositionScenario.trigger('compositionstart');
+compositionScenario.trigger('input', compositionScenario.input, true, true);
+assert.equal(compositionScenario.input.value, 'AB - 12');
+compositionScenario.trigger('compositionend');
+assert.equal(compositionScenario.input.value, 'AB12');
+
+const duplicateScenario = createScenario('/transactions');
+const originalInputListeners = duplicateScenario.listenerCount('input');
+duplicateScenario.rerun();
+assert.equal(duplicateScenario.listenerCount('input'), originalInputListeners);
+assert.equal(duplicateScenario.listenerCount('compositionstart'), 1);
+assert.equal(duplicateScenario.listenerCount('compositionend'), 1);
+
+const unsupportedScenario = createScenario('/unrelated');
+unsupportedScenario.input.value = 'keep - value';
+unsupportedScenario.trigger('input');
+assert.equal(unsupportedScenario.input.value, 'keep - value');
+assert.equal(unsupportedScenario.getEvaluatedSelector(), '');
+assert.equal(unsupportedScenario.getEvaluatedXpath(), '');
 
 console.log('PayManager search input normalization tests passed.');

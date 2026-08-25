@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      1.9
+// @version      1.9.1
 // @description  Converts ChainID and PaymentID values into clickable links and adds smart search helpers
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -17,28 +17,45 @@
 (function () {
     'use strict';
 
+    const INSTANCE_KEY = '__passPayUserAdminInitialized';
+    const HISTORY_PATCH_KEY = '__passPayUserAdminHistoryPatched';
+
+    if (window[INSTANCE_KEY]) return;
+    window[INSTANCE_KEY] = true;
+
+    const STYLE_ID = 'pp-useradmin-styles';
+    const BUTTON_ID = 'pp-useradmin-remove-spaces-btn';
+    const SMART_INPUT_MARKER = 'ppUseradminSmartSpaces';
+    const LINK_MARKER = 'ppUseradminLinkified';
+    const LINK_ATTRIBUTE = 'data-pp-useradmin-link';
+    const SEARCH_LABELS = new Set(['search', 'søk']);
+
     const PAYMANAGER_BASE_URL =
         'https://paymanager.logos.dk/transactions?chainid=';
 
     const DIBS_BASE_URL =
         'https://portal.dibspayment.eu/portal-frontend/payments?searchKey=PAYMENT_ID&searchValue=';
 
-    // ============================================================
-    // Styles
-    // ============================================================
+    let observer = null;
+    let runScheduled = false;
+    let animationFrame = null;
+    const pendingRoots = new Set();
+
+    function isAdministrationPage() {
+        return (
+            location.pathname === '/administration' ||
+            location.pathname.startsWith('/administration/')
+        );
+    }
 
     function injectStyles() {
-
-        if (document.getElementById('pp-userscript-styles')) {
-            return;
-        }
+        if (document.getElementById(STYLE_ID)) return;
 
         const style = document.createElement('style');
 
-        style.id = 'pp-userscript-styles';
-
+        style.id = STYLE_ID;
         style.textContent = `
-            .pp-button {
+            .pp-useradmin-button {
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -49,8 +66,7 @@
                 appearance: none;
                 min-width: 64px;
                 border: 0;
-                outline: 0;
-                margin: 0;
+                margin: 0 0 1px 8px;
                 padding: 6px 16px;
                 border-radius: 4px;
                 background-color: #ffc94d;
@@ -61,6 +77,7 @@
                 letter-spacing: 0.02857em;
                 font-weight: 500;
                 text-transform: none;
+                white-space: nowrap;
                 box-shadow:
                     0px 3px 1px -2px rgba(0,0,0,0.20),
                     0px 2px 2px 0px rgba(0,0,0,0.14),
@@ -71,7 +88,7 @@
                     transform 120ms ease;
             }
 
-            .pp-button:hover {
+            .pp-useradmin-button:hover {
                 background-color: #ffbd2e;
                 box-shadow:
                     0px 2px 4px -1px rgba(0,0,0,0.20),
@@ -80,7 +97,7 @@
                 transform: translateY(-1px);
             }
 
-            .pp-button:active {
+            .pp-useradmin-button:active {
                 transform: translateY(0);
                 box-shadow:
                     0px 5px 5px -3px rgba(0,0,0,0.20),
@@ -88,19 +105,12 @@
                     0px 3px 14px 2px rgba(0,0,0,0.12);
             }
 
-            #pp-search-wrapper {
-                display: flex;
-                align-items: flex-end;
-                gap: 8px;
-                width: 100%;
+            .pp-useradmin-button:focus-visible {
+                outline: 3px solid #1976d2;
+                outline-offset: 2px;
             }
 
-            #pp-remove-spaces-btn {
-                white-space: nowrap;
-                margin-bottom: 1px;
-            }
-
-            .pp-chain-link {
+            .pp-useradmin-chain-link {
                 color: #1976d2;
                 text-decoration: underline;
                 cursor: pointer;
@@ -110,43 +120,29 @@
         document.head.appendChild(style);
     }
 
-    // ============================================================
-    // Helpers
-    // ============================================================
-
     function setReactInputValue(input, value) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            'value'
+        )?.set;
 
-        const nativeSetter =
-            Object.getOwnPropertyDescriptor(
-                HTMLInputElement.prototype,
-                'value'
-            ).set;
+        if (nativeSetter) {
+            nativeSetter.call(input, value);
+        } else {
+            input.value = value;
+        }
 
-        nativeSetter.call(input, value);
-
-        input.dispatchEvent(
-            new Event('input', {
-                bubbles: true
-            })
-        );
-
-        input.dispatchEvent(
-            new Event('change', {
-                bubbles: true
-            })
-        );
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function normalizeSearchValue(value) {
-
         const trimmed = value.trim();
 
-        // Norwegian phone format: three digits, two digits, three digits
         if (/^\d{3}\s+\d{2}\s+\d{3}$/.test(trimmed)) {
             return trimmed.replace(/\s+/g, '');
         }
 
-        // Plate format: two letters followed by four or five digits
         if (/^[A-Za-z]{2}\s+\d{4,5}$/.test(trimmed)) {
             return trimmed.replace(/\s+/g, '');
         }
@@ -154,306 +150,435 @@
         return value;
     }
 
-    // ============================================================
-    // Smart Search
-    // ============================================================
+    function normalizeLabel(value) {
+        return String(value || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLocaleLowerCase();
+    }
+
+    function inputIsUsable(input) {
+        if (
+            !input ||
+            !input.isConnected ||
+            input.disabled ||
+            input.hidden ||
+            input.type === 'hidden' ||
+            input.getAttribute('aria-hidden') === 'true'
+        ) {
+            return false;
+        }
+
+        try {
+            const style = window.getComputedStyle(input);
+
+            if (
+                style &&
+                (style.display === 'none' || style.visibility === 'hidden')
+            ) {
+                return false;
+            }
+        } catch {
+            // Connected, enabled inputs remain eligible without computed styles.
+        }
+
+        return true;
+    }
+
+    function getInputForLabel(label) {
+        if (label.control && inputIsUsable(label.control)) {
+            return label.control;
+        }
+
+        const forId = label.getAttribute('for');
+
+        if (forId) {
+            const input = document.getElementById(forId);
+            if (inputIsUsable(input)) return input;
+        }
+
+        const nestedInput = label.querySelector('input');
+        if (inputIsUsable(nestedInput)) return nestedInput;
+
+        const formControl = label.closest('.MuiFormControl-root');
+        const relatedInput = formControl?.querySelector('input');
+
+        return inputIsUsable(relatedInput) ? relatedInput : null;
+    }
+
+    function findAdministrationSearchInput() {
+        if (!isAdministrationPage()) return null;
+
+        const labelledCandidates = new Set();
+
+        document.querySelectorAll('label').forEach(label => {
+            if (!SEARCH_LABELS.has(normalizeLabel(label.textContent))) return;
+
+            const input = getInputForLabel(label);
+            if (input) labelledCandidates.add(input);
+        });
+
+        document.querySelectorAll('input[aria-label]').forEach(input => {
+            if (
+                SEARCH_LABELS.has(normalizeLabel(input.getAttribute('aria-label'))) &&
+                inputIsUsable(input)
+            ) {
+                labelledCandidates.add(input);
+            }
+        });
+
+        if (labelledCandidates.size === 1) {
+            return labelledCandidates.values().next().value;
+        }
+
+        if (labelledCandidates.size > 1) return null;
+
+        const fallbackCandidates = Array.from(document.querySelectorAll(
+            '.MuiTextField-root input'
+        )).filter(inputIsUsable);
+
+        return fallbackCandidates.length === 1
+            ? fallbackCandidates[0]
+            : null;
+    }
 
     function addSmartSpaceRemoval() {
+        const input = findAdministrationSearchInput();
 
-        const path = window.location.pathname;
+        if (!input || input.dataset[SMART_INPUT_MARKER] === 'true') return;
 
-        if (
-            path !== '/administration' &&
-            path !== '/administration/'
-        ) {
-            return;
-        }
-
-        const input = document.querySelector(
-            '.MuiTextField-root input'
-        );
-
-        if (!input) {
-            return;
-        }
-
-        if (input.dataset.ppSmartSpaces === 'true') {
-            return;
-        }
-
-        input.dataset.ppSmartSpaces = 'true';
+        input.dataset[SMART_INPUT_MARKER] = 'true';
 
         const cleanValue = () => {
+            if (
+                !isAdministrationPage() ||
+                input !== findAdministrationSearchInput()
+            ) {
+                return;
+            }
 
-            const cleaned =
-                normalizeSearchValue(input.value);
+            const cleaned = normalizeSearchValue(input.value);
 
             if (cleaned !== input.value) {
-                setReactInputValue(
-                    input,
-                    cleaned
-                );
+                setReactInputValue(input, cleaned);
             }
         };
 
         input.addEventListener('input', cleanValue);
         input.addEventListener('paste', () => {
-            setTimeout(cleanValue, 0);
+            window.setTimeout(cleanValue, 0);
         });
-
     }
 
-    // ============================================================
-    // Manual Button
-    // ============================================================
+    function handleRemoveSpacesClick() {
+        const searchInput = findAdministrationSearchInput();
+
+        if (!searchInput) return;
+
+        const cleaned = searchInput.value.replace(/\s+/g, '');
+
+        setReactInputValue(searchInput, cleaned);
+        searchInput.focus();
+    }
 
     function addRemoveSpacesButton() {
+        const searchInput = findAdministrationSearchInput();
 
-        const path = window.location.pathname;
+        if (!searchInput) return;
+
+        const formControl = searchInput.closest('.MuiFormControl-root');
+        const parent = formControl?.parentNode;
+
+        if (!formControl || !parent) return;
+
+        let button = document.getElementById(BUTTON_ID);
+
+        if (!button) {
+            button = document.createElement('button');
+            button.id = BUTTON_ID;
+            button.className = 'pp-useradmin-button';
+            button.type = 'button';
+            button.textContent = 'No Spaces';
+            button.setAttribute(
+                'aria-label',
+                'Remove spaces from the current search value'
+            );
+            button.addEventListener('click', handleRemoveSpacesClick);
+        }
 
         if (
-            path !== '/administration' &&
-            path !== '/administration/'
+            button.parentNode !== parent ||
+            button.previousElementSibling !== formControl
+        ) {
+            parent.insertBefore(button, formControl.nextSibling);
+        }
+    }
+
+    function removeSearchButton() {
+        document.getElementById(BUTTON_ID)?.remove();
+    }
+
+    function getIdentifierUrl(element, text) {
+        const label = normalizeLabel(
+            element.previousElementSibling?.textContent
+        );
+
+        if (
+            /^\d{24,32}$/.test(text) &&
+            (label === 'chainid' || label === 'chain id')
+        ) {
+            return PAYMANAGER_BASE_URL + encodeURIComponent(text);
+        }
+
+        if (
+            /^[a-f0-9]{32}$/i.test(text) &&
+            (label === 'payment id' || label === 'betalings id')
+        ) {
+            return DIBS_BASE_URL + encodeURIComponent(text);
+        }
+
+        return null;
+    }
+
+    function getOwnedLink(element) {
+        return element?.childElementCount === 1 &&
+            element.firstElementChild?.matches(`a[${LINK_ATTRIBUTE}]`)
+                ? element.firstElementChild
+                : null;
+    }
+
+    function elementCanBeLinkified(element) {
+        if (!element.matches('p, span')) return false;
+        if (
+            element.closest(
+                'a, button, input, textarea, select, [contenteditable="true"]'
+            )
+        ) {
+            return false;
+        }
+
+        if (getOwnedLink(element)) return true;
+
+        return !element.querySelector(
+            'a, button, input, textarea, select, [contenteditable="true"]'
+        );
+    }
+
+    function unlinkOwnedElement(element) {
+        const existingLink = getOwnedLink(element);
+
+        if (!existingLink) return false;
+
+        element.textContent = existingLink.textContent || '';
+        delete element.dataset[LINK_MARKER];
+        return true;
+    }
+
+    function linkifyElement(element) {
+        if (!elementCanBeLinkified(element)) return;
+
+        const text = element.textContent?.trim();
+
+        if (!text) {
+            unlinkOwnedElement(element);
+            return;
+        }
+
+        const url = getIdentifierUrl(element, text);
+        const existingLink = getOwnedLink(element);
+
+        if (!url) {
+            unlinkOwnedElement(element);
+            return;
+        }
+
+        if (
+            element.dataset[LINK_MARKER] === 'true' &&
+            existingLink?.getAttribute('href') === url &&
+            existingLink.textContent === text
         ) {
             return;
         }
 
-        if (document.getElementById('pp-remove-spaces-btn')) {
+        if (existingLink) {
+            existingLink.href = url;
+            existingLink.textContent = text;
+            element.dataset[LINK_MARKER] = 'true';
             return;
         }
 
-        const searchInput = document.querySelector(
-            '.MuiTextField-root input'
-        );
+        if (element.childElementCount > 0 && !existingLink) return;
 
-        if (!searchInput) {
-            return;
-        }
+        const link = document.createElement('a');
 
-        const formControl =
-            searchInput.closest('.MuiFormControl-root');
+        link.href = url;
+        link.textContent = text;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.className = 'pp-useradmin-chain-link';
+        link.setAttribute(LINK_ATTRIBUTE, 'true');
 
-        if (!formControl) {
-            return;
-        }
-
-        let wrapper =
-            document.getElementById(
-                'pp-search-wrapper'
-            );
-
-        if (!wrapper) {
-
-            wrapper =
-                document.createElement('div');
-
-            wrapper.id =
-                'pp-search-wrapper';
-
-            formControl.parentNode.insertBefore(
-                wrapper,
-                formControl
-            );
-
-            wrapper.appendChild(
-                formControl
-            );
-        }
-
-        const button =
-            document.createElement('button');
-
-        button.id =
-            'pp-remove-spaces-btn';
-
-        button.className =
-            'pp-button';
-
-        button.type = 'button';
-
-        button.textContent =
-            'No Spaces';
-
-        button.addEventListener(
-            'click',
-            () => {
-
-                const cleaned =
-                    searchInput.value.replace(
-                        /\s+/g,
-                        ''
-                    );
-
-                setReactInputValue(
-                    searchInput,
-                    cleaned
-                );
-
-                searchInput.focus();
-            }
-        );
-
-        wrapper.appendChild(button);
+        element.replaceChildren(link);
+        element.dataset[LINK_MARKER] = 'true';
     }
 
-    // ============================================================
-    // ChainID / PaymentID Links
-    // ============================================================
+    function removeLinkifications() {
+        document.querySelectorAll(`a[${LINK_ATTRIBUTE}]`).forEach(link => {
+            const container = link.parentElement;
 
-    function makeLinks(root = document) {
-
-        const elements =
-            root.querySelectorAll(
-                'p, span'
-            );
-
-        elements.forEach(element => {
-
-            if (
-                element.dataset.linkified ===
-                'true'
-            ) {
-                return;
+            if (container?.matches('p, span') && getOwnedLink(container) === link) {
+                unlinkOwnedElement(container);
             }
-
-            const text =
-                element.textContent?.trim();
-
-            if (!text) {
-                return;
-            }
-
-            const previous =
-                element
-                    .previousElementSibling
-                    ?.textContent
-                    ?.trim()
-                    .toLowerCase() || '';
-
-            const parentText =
-                element.parentElement
-                    ?.textContent
-                    ?.toLowerCase() || '';
-
-            let url = null;
-
-            // ChainID
-            if (
-                /^\d{24,32}$/.test(text) &&
-                (
-                    previous.includes(
-                        'chainid'
-                    ) ||
-                    parentText.includes(
-                        'chainid'
-                    )
-                )
-            ) {
-                url =
-                    PAYMANAGER_BASE_URL +
-                    encodeURIComponent(
-                        text
-                    );
-            }
-
-            // Payment ID
-            else if (
-                /^[a-f0-9]{32}$/i.test(
-                    text
-                ) &&
-                (
-                    previous.includes(
-                        'payment id'
-                    ) ||
-                    previous.includes(
-                        'betalings id'
-                    ) ||
-                    parentText.includes(
-                        'payment id'
-                    ) ||
-                    parentText.includes(
-                        'betalings id'
-                    )
-                )
-            ) {
-                url =
-                    DIBS_BASE_URL +
-                    encodeURIComponent(
-                        text
-                    );
-            }
-
-            if (!url) {
-                return;
-            }
-
-            const link =
-                document.createElement(
-                    'a'
-                );
-
-            link.href = url;
-            link.textContent = text;
-            link.target = '_blank';
-            link.rel =
-                'noopener noreferrer';
-            link.className =
-                'pp-chain-link';
-
-            link.dataset.linkified =
-                'true';
-
-            element.replaceWith(link);
         });
     }
 
-    // ============================================================
-    // Main
-    // ============================================================
+    function processRoot(root) {
+        if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
 
-    function run() {
+        if (root.matches('p, span')) {
+            linkifyElement(root);
+        }
 
-        makeLinks();
+        root.querySelectorAll('p, span').forEach(linkifyElement);
+    }
 
+    function runPendingWork() {
+        runScheduled = false;
+        animationFrame = null;
+
+        if (!isAdministrationPage()) {
+            pendingRoots.clear();
+            observer?.disconnect();
+            observer = null;
+            removeSearchButton();
+            removeLinkifications();
+            return;
+        }
+
+        ensureObserver();
+
+        const roots = Array.from(pendingRoots);
+        pendingRoots.clear();
+
+        roots.forEach(processRoot);
         addRemoveSpacesButton();
-
         addSmartSpaceRemoval();
     }
 
-    let runScheduled = false;
+    function queuePendingRoot(root) {
+        if (root?.nodeType === Node.TEXT_NODE) {
+            root = root.parentElement;
+        }
 
-    function scheduleRun() {
+        if (root?.nodeType !== Node.ELEMENT_NODE) return;
+
+        for (const existingRoot of pendingRoots) {
+            if (existingRoot === root || existingRoot.contains?.(root)) {
+                return;
+            }
+
+            if (root.contains?.(existingRoot)) {
+                pendingRoots.delete(existingRoot);
+            }
+        }
+
+        pendingRoots.add(root);
+    }
+
+    function scheduleRun(root = document.body) {
+        queuePendingRoot(root);
+
         if (runScheduled) return;
 
         runScheduled = true;
+        animationFrame = requestAnimationFrame(runPendingWork);
+    }
 
-        requestAnimationFrame(() => {
-            runScheduled = false;
-            run();
+    function handleMutations(records) {
+        for (const record of records) {
+            if (record.type === 'characterData') {
+                scheduleRun(record.target.parentElement?.parentElement ||
+                    record.target.parentElement);
+                continue;
+            }
+
+            scheduleRun(record.target);
+
+            record.addedNodes.forEach(node => {
+                scheduleRun(
+                    node.nodeType === Node.TEXT_NODE
+                        ? node.parentElement
+                        : node
+                );
+            });
+        }
+    }
+
+    function hookNavigation() {
+        if (history[HISTORY_PATCH_KEY]) return;
+
+        history[HISTORY_PATCH_KEY] = true;
+
+        for (const methodName of ['pushState', 'replaceState']) {
+            const originalMethod = history[methodName];
+
+            history[methodName] = function () {
+                const result = originalMethod.apply(this, arguments);
+
+                scheduleRun(document.body);
+                return result;
+            };
+        }
+
+        window.addEventListener('popstate', () => {
+            scheduleRun(document.body);
         });
     }
 
-    injectStyles();
+    function ensureObserver() {
+        if (observer || !document.body || !isAdministrationPage()) return;
 
-    run();
-
-    const observer =
-        new MutationObserver(scheduleRun);
-
-    observer.observe(
-        document.body,
-        {
+        observer = new MutationObserver(handleMutations);
+        observer.observe(document.body, {
+            characterData: true,
             childList: true,
             subtree: true
-        }
-    );
-
-    [500, 1500, 3000, 5000]
-        .forEach(delay => {
-            setTimeout(
-                scheduleRun,
-                delay
-            );
         });
+    }
+
+    function start() {
+        if (!document.body) return;
+
+        injectStyles();
+        scheduleRun(document.body);
+
+        ensureObserver();
+
+        window.addEventListener('pagehide', () => {
+            observer?.disconnect();
+            observer = null;
+
+            if (animationFrame !== null) {
+                cancelAnimationFrame(animationFrame);
+                animationFrame = null;
+            }
+
+            pendingRoots.clear();
+            runScheduled = false;
+        });
+
+        window.addEventListener('pageshow', () => {
+            ensureObserver();
+            scheduleRun(document.body);
+        });
+    }
+
+    hookNavigation();
+
+    if (document.body) {
+        start();
+    } else {
+        document.addEventListener('DOMContentLoaded', start, { once: true });
+    }
 
 })();

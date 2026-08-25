@@ -14,10 +14,16 @@ assert.notEqual(initIndex, -1, 'Could not isolate userscript initialization');
 const testSource = `${source.slice(0, initIndex)}
     globalThis.__handoffTest = {
         applyRequestedHandoff,
+        applyUser,
         restartParkingSearch,
+        getEffectiveHandoff,
         getSavedManualPlate,
+        saveManualPlate,
         isEmptyEntriesText,
-        isEntriesSummaryText
+        isEntriesSummaryText,
+        startInitialHandoffOrRestore,
+        markTableReloadExpected,
+        hasTableChangedSince
     };
 })();`;
 
@@ -39,7 +45,10 @@ function createHandoffScenario({
     pendingInitialText = '1 10 38',
     pendingFilteredText = '1 1 38',
     activeApplyAfterDispatches = 1,
-    pendingApplyAfterDispatches = 1
+    pendingApplyAfterDispatches = 1,
+    activeFilteredRowMode = 'match',
+    pendingFilteredRowMode = 'match',
+    locationHash = '#tmAreaManager=Example%20Manager&tmLicensePlate=TEST123'
 } = {}) {
     let clock = 0;
     let cleanUrl = '';
@@ -51,8 +60,27 @@ function createHandoffScenario({
     let nextTimerId = 1;
     const timers = [];
     const storage = new Map();
+    const persistentStorage = new Map();
     const dispatchedEvents = [];
     const statusClickTimes = [];
+    const jqueryTriggeredEvents = [];
+    const tableMutationObservers = [];
+
+    class FakeMutationObserver {
+        constructor(callback) {
+            this.callback = callback;
+            this.connected = false;
+            tableMutationObservers.push(this);
+        }
+
+        observe() {
+            this.connected = true;
+        }
+
+        disconnect() {
+            this.connected = false;
+        }
+    }
 
     function currentInitialText() {
         return currentStatus === 'active'
@@ -64,6 +92,53 @@ function createHandoffScenario({
         return currentStatus === 'active'
             ? activeFilteredText
             : pendingFilteredText;
+    }
+
+    function currentFilteredRowMode() {
+        return currentStatus === 'active'
+            ? activeFilteredRowMode
+            : pendingFilteredRowMode;
+    }
+
+    function hasRows(entriesText) {
+        const numbers = String(entriesText).match(/\d+/g) || [];
+        return Number(numbers[0]) > 0 || Number(numbers[1]) > 0;
+    }
+
+    function createRow(value) {
+        const cell = { textContent: value };
+
+        return {
+            cells: [cell],
+            hidden: false,
+            style: {},
+            textContent: value,
+            getAttribute() {
+                return null;
+            },
+            querySelector() {
+                return null;
+            }
+        };
+    }
+
+    let renderedRows = [];
+
+    function showInitialRows() {
+        renderedRows = hasRows(currentInitialText())
+            ? [createRow('OTHER999')]
+            : [];
+    }
+
+    function showFilteredRows(licensePlate) {
+        if (!hasRows(currentFilteredText())) {
+            renderedRows = [];
+            return;
+        }
+
+        renderedRows = currentFilteredRowMode() === 'match'
+            ? [createRow(licensePlate)]
+            : [createRow('OTHER999')];
     }
 
     class FakeDate extends Date {
@@ -81,6 +156,25 @@ function createHandoffScenario({
 
     const entriesInfo = {
         textContent: currentInitialText()
+    };
+
+    showInitialRows();
+
+    const tableContainer = {};
+    const table = {
+        get textContent() {
+            return renderedRows.map(row => row.textContent).join(' ');
+        },
+        get tBodies() {
+            return [{ textContent: this.textContent }];
+        },
+        parentElement: tableContainer,
+        closest() {
+            return null;
+        },
+        querySelectorAll(selector) {
+            return selector === 'tbody tr' ? renderedRows : [];
+        }
     };
 
     class FakeInput {
@@ -108,17 +202,20 @@ function createHandoffScenario({
             if (event.type === 'input') {
                 if (!this.value) {
                     entriesInfo.textContent = currentInitialText();
+                    showInitialRows();
                 } else if (currentStatus === 'active') {
                     activePlateDispatches++;
 
                     if (activePlateDispatches >= activeApplyAfterDispatches) {
                         entriesInfo.textContent = currentFilteredText();
+                        showFilteredRows(this.value);
                     }
                 } else {
                     pendingPlateDispatches++;
 
                     if (pendingPlateDispatches >= pendingApplyAfterDispatches) {
                         entriesInfo.textContent = currentFilteredText();
+                        showFilteredRows(this.value);
                     }
                 }
             }
@@ -151,6 +248,7 @@ function createHandoffScenario({
             activeClasses.add('active_tab');
             pendingClasses.delete('active_tab');
             entriesInfo.textContent = activeInitialText;
+            showInitialRows();
             statusClickTimes.push({ status: 'active', at: clock });
         }
     };
@@ -166,6 +264,7 @@ function createHandoffScenario({
             pendingClasses.add('active_tab');
             activeClasses.delete('active_tab');
             entriesInfo.textContent = pendingInitialText;
+            showInitialRows();
             statusClickTimes.push({ status: 'pending', at: clock });
         }
     };
@@ -173,12 +272,22 @@ function createHandoffScenario({
         value: 'manager-1',
         textContent: 'Example Manager'
     };
+    const secondOption = {
+        value: 'manager-2',
+        textContent: 'Second Manager'
+    };
     const select = {
         value: option.value,
-        options: [option],
+        options: [option, secondOption],
         dispatchedEvents: [],
         dispatchEvent(event) {
             this.dispatchedEvents.push(event.type);
+
+            if (event.type === 'change' && this.value === secondOption.value) {
+                entriesInfo.textContent = '1 10 70';
+                renderedRows = [createRow('SECOND999')];
+            }
+
             return true;
         }
     };
@@ -186,7 +295,7 @@ function createHandoffScenario({
     const location = {
         pathname: '/parking',
         search: '',
-        hash: '#tmAreaManager=Example%20Manager&tmLicensePlate=TEST123'
+        hash: locationHash
     };
 
     const document = {
@@ -196,6 +305,18 @@ function createHandoffScenario({
             if (id === 'tm-parking-license-plate-input') return plateEditor;
             if (id === 'parkings_active_btn') return activeButton;
             if (id === 'parkings_pending_btn') return pendingButton;
+            if (id === 'parkings_table_info') return entriesInfo;
+            if (id === 'parkings_table') return table;
+            return null;
+        },
+        querySelector(selector) {
+            if (
+                selector.includes('#parkings_table_filter') ||
+                selector.includes('aria-controls="parkings_table"')
+            ) {
+                return input;
+            }
+
             return null;
         },
         evaluate(xpath) {
@@ -214,6 +335,7 @@ function createHandoffScenario({
         Date: FakeDate,
         Event: FakeEvent,
         HTMLInputElement: FakeInput,
+        MutationObserver: FakeMutationObserver,
         URLSearchParams,
         XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
         document,
@@ -234,6 +356,19 @@ function createHandoffScenario({
             },
             removeItem(key) {
                 storage.delete(key);
+            }
+        },
+        localStorage: {
+            getItem(key) {
+                return persistentStorage.has(key)
+                    ? persistentStorage.get(key)
+                    : null;
+            },
+            setItem(key, value) {
+                persistentStorage.set(key, String(value));
+            },
+            removeItem(key) {
+                persistentStorage.delete(key);
             }
         },
         window: {
@@ -284,6 +419,7 @@ function createHandoffScenario({
         plateEditor,
         select,
         status,
+        location,
         getClock: () => clock,
         getCleanUrl: () => cleanUrl,
         getActiveClicks: () => activeClicks,
@@ -292,6 +428,48 @@ function createHandoffScenario({
         getPendingPlateDispatches: () => pendingPlateDispatches,
         getDispatchedEvents: () => dispatchedEvents,
         getStatusClickTimes: () => statusClickTimes,
+        getJqueryTriggeredEvents: () => jqueryTriggeredEvents,
+        runScriptAgain() {
+            const existingApi = context.__handoffTest;
+            vm.runInNewContext(testSource, context);
+            return context.__handoffTest === existingApi;
+        },
+        enableJqueryMobile() {
+            context.window.jQuery = element => {
+                const api = {
+                    val(value) {
+                        element.value = value;
+                        return api;
+                    },
+                    trigger(type) {
+                        jqueryTriggeredEvents.push(type);
+                        return api;
+                    },
+                    selectmenu() {
+                        return api;
+                    }
+                };
+
+                return api;
+            };
+        },
+        saveSelectedUser(value) {
+            persistentStorage.set(
+                'pm_selected_prs_user',
+                JSON.stringify({ value, savedAt: clock })
+            );
+        },
+        setSessionValue(key, value) {
+            storage.set(key, String(value));
+        },
+        hasSessionValue(key) {
+            return storage.has(key);
+        },
+        triggerTableMutation() {
+            for (const observer of tableMutationObservers) {
+                if (observer.connected) observer.callback([]);
+            }
+        },
         runTimers
     };
 }
@@ -300,6 +478,8 @@ function createHandoffScenario({
 const activeMatch = createHandoffScenario({
     activeApplyAfterDispatches: 2
 });
+
+assert.equal(activeMatch.runScriptAgain(), true);
 
 assert.equal(activeMatch.api.applyRequestedHandoff(), true);
 activeMatch.runTimers();
@@ -364,6 +544,111 @@ assert.equal(
     emptyBoth.status.textContent,
     'No active or Pending entries found for: TEST123'
 );
+
+// An ignored filter must not turn an unchanged unfiltered table into a match.
+const ignoredFilter = createHandoffScenario({
+    activeFilteredText: '1 10 69',
+    activeFilteredRowMode: 'mismatch'
+});
+
+assert.equal(ignoredFilter.api.applyRequestedHandoff(), true);
+ignoredFilter.runTimers();
+
+assert.equal(ignoredFilter.getPendingClicks(), 0);
+assert.equal(
+    ignoredFilter.status.textContent,
+    'PayManager did not apply the plate filter for: TEST123'
+);
+
+// A positive summary is not a match unless a rendered row contains the plate.
+const mismatchedRows = createHandoffScenario({
+    activeFilteredText: '1 1 69',
+    activeFilteredRowMode: 'mismatch'
+});
+
+assert.equal(mismatchedRows.api.applyRequestedHandoff(), true);
+mismatchedRows.runTimers();
+
+assert.equal(mismatchedRows.getPendingClicks(), 0);
+assert.equal(
+    mismatchedRows.status.textContent,
+    'PayManager returned rows, but none matched: TEST123'
+);
+
+// PRS selection emits one change event, even when jQuery Mobile is present.
+const prsSelection = createHandoffScenario({ locationHash: '' });
+prsSelection.enableJqueryMobile();
+
+assert.equal(
+    prsSelection.api.applyUser('manager-2', 'Second Manager', true),
+    true
+);
+assert.equal(
+    prsSelection.select.dispatchedEvents.filter(type => type === 'change').length,
+    1
+);
+assert.deepEqual(prsSelection.getJqueryTriggeredEvents(), []);
+
+// A DataTables redraw can be meaningful even when its final text is identical.
+const identicalRedraw = createHandoffScenario({ locationHash: '' });
+const tableAction = identicalRedraw.api.markTableReloadExpected();
+assert.equal(identicalRedraw.api.hasTableChangedSince(tableAction), false);
+identicalRedraw.triggerTableMutation();
+assert.equal(identicalRedraw.api.hasTableChangedSince(tableAction), true);
+
+// Expired handoffs also remove the pending-status signature containing the plate.
+const expiredHandoff = createHandoffScenario({ locationHash: '' });
+expiredHandoff.setSessionValue(
+    'pm_parking_handoff_v1',
+    JSON.stringify({
+        areaManager: 'Expired Manager',
+        licensePlate: 'OLD123',
+        savedAt: -400_000
+    })
+);
+expiredHandoff.setSessionValue(
+    'pm_parking_handoff_pending_v1',
+    '["Expired Manager","OLD123"]'
+);
+expiredHandoff.api.getEffectiveHandoff();
+assert.equal(expiredHandoff.hasSessionValue('pm_parking_handoff_v1'), false);
+assert.equal(
+    expiredHandoff.hasSessionValue('pm_parking_handoff_pending_v1'),
+    false
+);
+
+// An explicit area-only handoff must not inherit a stale manual plate.
+const areaOnly = createHandoffScenario({
+    locationHash: '#tmAreaManager=Example%20Manager'
+});
+
+areaOnly.api.saveManualPlate('STALE123');
+const areaOnlyHandoff = areaOnly.api.getEffectiveHandoff();
+
+assert.equal(areaOnlyHandoff.areaManager, 'Example Manager');
+assert.equal(areaOnlyHandoff.licensePlate, '');
+assert.equal(areaOnlyHandoff.explicit, true);
+assert.equal(areaOnly.api.getSavedManualPlate(), '');
+
+// A manual resume restores the saved PRS before it searches the table.
+const manualResume = createHandoffScenario({ locationHash: '' });
+
+manualResume.api.saveManualPlate('MANUAL123');
+manualResume.saveSelectedUser('manager-2');
+manualResume.api.startInitialHandoffOrRestore();
+
+assert.equal(manualResume.select.value, 'manager-1');
+assert.equal(manualResume.getActivePlateDispatches(), 0);
+
+manualResume.runTimers();
+
+assert.equal(manualResume.select.value, 'manager-2');
+assert.equal(
+    manualResume.select.dispatchedEvents.filter(type => type === 'change').length,
+    1
+);
+assert.equal(manualResume.input.value, 'MANUAL123');
+assert.equal(manualResume.status.textContent, 'Found in Active: MANUAL123');
 
 // Changing the editable plate starts the same guarded search again.
 assert.equal(activeMatch.api.restartParkingSearch(' alt-456 '), true);

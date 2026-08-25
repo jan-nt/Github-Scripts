@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Search Input Normalizer
 // @namespace    https://nidushan.com
-// @version      1.0
+// @version      1.0.1
 // @description  Removes spaces and dashes from PayManager transaction and parking search input
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -18,6 +18,24 @@
 (function () {
     'use strict';
 
+    const STATE_KEY = Symbol.for(
+        'tampermonkey.paymanager.search-input-normalizer'
+    );
+
+    if (window[STATE_KEY]?.initialized) return;
+
+    const state = {
+        initialized: true,
+        composingInputs: new WeakSet()
+    };
+
+    window[STATE_KEY] = state;
+
+    const SEARCH_INPUT_SELECTORS = {
+        '/transactions': '#financial_table_filter input[type="search"]',
+        '/parking': '#parkings_table_filter input[type="search"]'
+    };
+
     const SEARCH_INPUT_XPATHS = {
         '/transactions':
             '/html/body/div[2]/div[2]/div/div[3]/div[5]/div[3]/div[3]/label/input',
@@ -30,9 +48,14 @@
 
     function getSearchInput() {
         const pathname = location.pathname.replace(/\/+$/, '') || '/';
+        const selector = SEARCH_INPUT_SELECTORS[pathname];
         const xpath = SEARCH_INPUT_XPATHS[pathname];
 
-        if (!xpath) return null;
+        if (!selector || !xpath) return null;
+
+        const stableInput = document.querySelector(selector);
+
+        if (stableInput instanceof HTMLInputElement) return stableInput;
 
         try {
             const element = document.evaluate(
@@ -90,9 +113,39 @@
     function handleInputEvent(event) {
         if (!event.isTrusted) return;
 
+        if (!(event.target instanceof HTMLInputElement)) return;
+
+        const input = getSearchInput();
+
+        if (
+            input &&
+            event.target === input &&
+            !event.isComposing &&
+            !state.composingInputs.has(input)
+        ) {
+            normalizeInput(input);
+        }
+    }
+
+    function handleCompositionStart(event) {
+        if (!event.isTrusted) return;
+        if (!(event.target instanceof HTMLInputElement)) return;
+
         const input = getSearchInput();
 
         if (input && event.target === input) {
+            state.composingInputs.add(input);
+        }
+    }
+
+    function handleCompositionEnd(event) {
+        if (!event.isTrusted) return;
+        if (!(event.target instanceof HTMLInputElement)) return;
+
+        const input = getSearchInput();
+
+        if (input && event.target === input) {
+            state.composingInputs.delete(input);
             normalizeInput(input);
         }
     }
@@ -100,4 +153,10 @@
     document.addEventListener('input', handleInputEvent, true);
     document.addEventListener('change', handleInputEvent, true);
     document.addEventListener('blur', handleInputEvent, true);
+    document.addEventListener(
+        'compositionstart',
+        handleCompositionStart,
+        true
+    );
+    document.addEventListener('compositionend', handleCompositionEnd, true);
 })();

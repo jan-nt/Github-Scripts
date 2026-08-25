@@ -4,6 +4,9 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 const repositoryRoot = new URL('../', import.meta.url);
 const rawUrlPrefix =
     'https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/';
+const expectedAuthor = 'Jan Sinnadurai';
+const expectedNamespace = 'https://nidushan.com';
+const expectedHomepageUrl = 'https://nidushan.com';
 const expectedSupportUrl = 'mailto:jas@nortronic.com';
 
 const requiredSingleMetadata = [
@@ -45,11 +48,20 @@ const personalDataExamplePatterns = [
     ['license-plate-like example', /\b[A-Z]{2}[ -]\d{4,5}\b/]
 ];
 const textFileExtensions = new Set([
+    '.css',
+    '.csv',
+    '.env',
+    '.html',
+    '.ini',
     '.js',
     '.mjs',
     '.json',
     '.md',
+    '.ps1',
+    '.sh',
+    '.toml',
     '.txt',
+    '.tsv',
     '.yaml',
     '.yml'
 ]);
@@ -160,11 +172,25 @@ function validateSource(source, fileName, metadata, errors) {
         if (!value.startsWith('https://')) {
             addError(errors, fileName, 'all @match entries must use HTTPS');
         }
+
+        const host = value.match(/^https:\/\/([^/]+)/)?.[1] || '';
+        if (!host || host.includes('*')) {
+            addError(
+                errors,
+                fileName,
+                'all @match entries must use an exact HTTPS hostname'
+            );
+        }
     }
 
     const version = (metadata.get('version') || [''])[0];
-    if (!/^\d+(?:\.\d+){1,3}$/.test(version)) {
-        addError(errors, fileName, '@version must contain two to four numeric parts');
+    if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        addError(errors, fileName, '@version must use major.minor.patch');
+    }
+
+    const author = (metadata.get('author') || [''])[0];
+    if (author !== expectedAuthor) {
+        addError(errors, fileName, '@author does not match the project author');
     }
 
     const supportUrl = (metadata.get('supportURL') || [''])[0];
@@ -199,6 +225,14 @@ function validateSource(source, fileName, metadata, errors) {
 
     const namespace = (metadata.get('namespace') || [''])[0];
     const homepageUrl = (metadata.get('homepageURL') || [''])[0];
+
+    if (namespace !== expectedNamespace) {
+        addError(errors, fileName, '@namespace does not match the project URL');
+    }
+
+    if (homepageUrl !== expectedHomepageUrl) {
+        addError(errors, fileName, '@homepageURL does not match the project URL');
+    }
 
     for (const [key, value] of [
         ['namespace', namespace],

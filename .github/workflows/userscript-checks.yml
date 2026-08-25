@@ -41,6 +41,11 @@ jobs:
 
       - name: Test userscript behavior
         run: |
+          node scripts/test-general-background-session-keeper.mjs
+          node scripts/test-general-custom-icons.mjs
+          node scripts/test-passpay-useradmin.mjs
           node scripts/test-search-input-normalizer.mjs
+          node scripts/test-paymanager-column-controller.mjs
+          node scripts/test-paymanager-image-row-highlighter.mjs
           node scripts/test-paymanager-parking-handoff.mjs
           node scripts/test-passpay-search-admin-panel.mjs

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Column Controller
 // @namespace    https://nidushan.com
-// @version      1.2
+// @version      1.2.1
 // @description  Enable and disable selected PayManager columns automatically
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -17,11 +17,27 @@
 (function () {
     'use strict';
 
-    /************************************************************
-     * CONFIG
-     ************************************************************/
+    const STATE_KEY = Symbol.for(
+        'tampermonkey.paymanager.column-controller'
+    );
 
-    const columnsToDisable = [
+    if (window[STATE_KEY]?.initialized) return;
+
+    const state = {
+        initialized: true,
+        disposed: false,
+        inFlight: false,
+        rerunRequested: false,
+        runTimer: null,
+        observer: null,
+        discoveryObserver: null,
+        discoveryTimer: null,
+        observedRoots: new Set()
+    };
+
+    window[STATE_KEY] = state;
+
+    const COLUMNS_TO_DISABLE = [
         "financial_terminal",
         "financial_emails",
         "financial_phonenumbers",
@@ -39,164 +55,333 @@
         "financial_pan"
     ];
 
-    const columnsToEnable = [
+    const COLUMNS_TO_ENABLE = [
         "financial_chainid"
     ];
 
-    const columnsTabXPath = "/html/body/div[2]/div[2]/div/div[3]/div[5]/a[1]";
-    const popupXPath = "/html/body/div[2]/div[25]";
+    const ALL_COLUMN_CLASSES = [
+        ...COLUMNS_TO_DISABLE,
+        ...COLUMNS_TO_ENABLE
+    ];
 
-    const START_DELAY_MS = 1000;
-    const PANEL_OPEN_DELAY_MS = 500;
+    const COLUMN_BUTTON_ID = 'financial_column_toggle_btn';
+    const COLUMN_POPUP_ID = 'financial_column_toggle';
+    const COLUMN_POPUP_SCREEN_ID = 'financial_column_toggle-screen';
+    const COLUMN_POPUP_WRAPPER_ID = 'financial_column_toggle-popup';
+
+    const COLUMN_BUTTON_XPATH =
+        "/html/body/div[2]/div[2]/div/div[3]/div[5]/a[1]";
+    const COLUMN_POPUP_XPATH = "/html/body/div[2]/div[25]";
+
+    const ELEMENT_WAIT_TIMEOUT_MS = 12_000;
+    const ELEMENT_WAIT_INTERVAL_MS = 200;
+    const DISCOVERY_TIMEOUT_MS = 15_000;
+    const REPLACEMENT_DEBOUNCE_MS = 250;
+    const COLUMN_CLICK_SETTLE_MS = 25;
     const CLOSE_POPUP_DELAY_MS = 100;
 
-    /************************************************************
-     * HELPERS
-     ************************************************************/
-
     function getXPath(xpath) {
-        return document.evaluate(
-            xpath,
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null
-        ).singleNodeValue;
+        try {
+            return document.evaluate(
+                xpath,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+            ).singleNodeValue;
+        } catch {
+            return null;
+        }
     }
 
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    /************************************************************
-     * CLOSE POPUP
-     ************************************************************/
+    async function waitFor(getter, timeoutMs = ELEMENT_WAIT_TIMEOUT_MS) {
+        const deadline = Date.now() + timeoutMs;
 
-    function closePopup() {
-        // 1) Try pressing Escape via keydown + keyup on document and window
-        const escapeOpts = {
-            key: "Escape",
-            code: "Escape",
-            keyCode: 27,
-            which: 27,
-            bubbles: true,
-            cancelable: true,
-            composed: true
-        };
+        while (Date.now() <= deadline) {
+            const value = getter();
 
-        document.dispatchEvent(new KeyboardEvent("keydown", escapeOpts));
-        document.dispatchEvent(new KeyboardEvent("keyup", escapeOpts));
-        window.dispatchEvent(new KeyboardEvent("keydown", escapeOpts));
-        window.dispatchEvent(new KeyboardEvent("keyup", escapeOpts));
+            if (value) return value;
 
-        // 2) Try to find a close/× button inside the popup
-        const popup = findColumnsPopup();
-        if (popup) {
-            const closeBtn = popup.querySelector(
-                'button[class*="close"], a[class*="close"], [data-dismiss], ' +
-                '.close, .btn-close, [aria-label="Close"], li.x, span.x, ' +
-                'a.x, i.x, button:has(svg), button:has(span)'
-            );
-            if (closeBtn) {
-                closeBtn.click();
-            } else {
-                // 3) Try clicking on a backdrop/overlay if one exists
-                const backdrop = document.querySelector(
-                    '.modal-backdrop, .overlay, .popup-backdrop, ' +
-                    'div[class*="backdrop"], div[class*="overlay"]'
-                );
-                if (backdrop) {
-                    backdrop.click();
-                }
-            }
-        }
-    }
-
-    /************************************************************
-     * COLUMN FUNCTIONS
-     ************************************************************/
-
-    async function openColumnsPanel() {
-        const btn = getXPath(columnsTabXPath);
-
-        if (!btn) {
-            return false;
-        }
-
-        btn.click();
-        await sleep(PANEL_OPEN_DELAY_MS);
-
-        return true;
-    }
-
-    function findColumnsPopup() {
-        let popup = getXPath(popupXPath);
-
-        if (popup) {
-            return popup;
-        }
-
-        const candidates = Array.from(document.querySelectorAll("body div"))
-            .filter(div => div.querySelectorAll("ul a").length > 5);
-
-        if (candidates.length > 0) {
-            popup = candidates[candidates.length - 1];
-            return popup;
+            await sleep(ELEMENT_WAIT_INTERVAL_MS);
         }
 
         return null;
     }
 
-    async function toggleColumns() {
-        const popup = findColumnsPopup();
+    function isClickableElement(element) {
+        return Boolean(element && typeof element.click === 'function');
+    }
 
-        if (!popup) {
-            return;
+    function isVerifiedColumnsButton(element) {
+        if (!isClickableElement(element)) return false;
+        if (element.id === COLUMN_BUTTON_ID) return true;
+
+        const popupReference = `#${COLUMN_POPUP_ID}`;
+
+        return element.getAttribute?.('href') === popupReference ||
+            element.getAttribute?.('data-target') === popupReference ||
+            element.getAttribute?.('aria-controls') === COLUMN_POPUP_ID;
+    }
+
+    function getColumnsButton() {
+        const stableButton = document.getElementById(COLUMN_BUTTON_ID);
+
+        if (isVerifiedColumnsButton(stableButton)) return stableButton;
+
+        const fallbackButton = getXPath(COLUMN_BUTTON_XPATH);
+
+        return isVerifiedColumnsButton(fallbackButton) ? fallbackButton : null;
+    }
+
+    function popupHasConfiguredColumns(popup) {
+        if (!popup || typeof popup.querySelector !== 'function') return false;
+
+        return ALL_COLUMN_CLASSES.some(columnClass =>
+            popup.querySelector(`a.${columnClass}`)
+        );
+    }
+
+    function findColumnsPopup() {
+        const stablePopup = document.getElementById(COLUMN_POPUP_ID);
+
+        if (popupHasConfiguredColumns(stablePopup)) return stablePopup;
+
+        const fallbackPopup = getXPath(COLUMN_POPUP_XPATH);
+
+        if (popupHasConfiguredColumns(fallbackPopup)) return fallbackPopup;
+
+        for (const columnClass of ALL_COLUMN_CLASSES) {
+            const control = document.querySelector(`a.${columnClass}`);
+            const candidate = control?.closest?.(
+                '[data-role="popup"], .ui-popup, .ui-popup-container'
+            );
+
+            if (popupHasConfiguredColumns(candidate)) return candidate;
         }
 
-        const items = popup.querySelectorAll("ul a");
+        return null;
+    }
 
-        items.forEach(el => {
-            const classes = Array.from(el.classList);
+    function isColumnsPopupOpen(popup) {
+        if (!popup) return false;
 
-            columnsToDisable.forEach(target => {
-                if (classes.includes(target)) {
-                    if (el.classList.contains("toggled")) {
-                        el.click();
-                    }
-                }
-            });
+        const popupWrapper = document.getElementById(COLUMN_POPUP_WRAPPER_ID);
+        const popupScreen = document.getElementById(COLUMN_POPUP_SCREEN_ID);
 
-            columnsToEnable.forEach(target => {
-                if (classes.includes(target)) {
-                    if (!el.classList.contains("toggled")) {
-                        el.click();
-                    }
-                }
-            });
+        return popup.getAttribute?.('aria-hidden') === 'false' ||
+            popupWrapper?.classList?.contains('ui-popup-active') ||
+            popupScreen?.classList?.contains('in');
+    }
+
+    async function openColumnsPanel() {
+        const button = await waitFor(getColumnsButton);
+
+        if (!button) return null;
+
+        const existingPopup = findColumnsPopup();
+
+        if (isColumnsPopupOpen(existingPopup)) return existingPopup;
+
+        button.click();
+
+        return waitFor(() => {
+            const popup = findColumnsPopup();
+            return isColumnsPopupOpen(popup) ? popup : null;
         });
     }
 
-    async function runColumnsController() {
-        await sleep(START_DELAY_MS);
+    function findColumnControl(columnClass) {
+        const popup = findColumnsPopup();
 
-        const opened = await openColumnsPanel();
+        return popup?.querySelector(`a.${columnClass}`) || null;
+    }
 
-        if (!opened) {
+    async function setColumnEnabled(columnClass, shouldEnable) {
+        const control = findColumnControl(columnClass);
+
+        if (!control) return false;
+
+        const isEnabled = control.classList.contains('toggled');
+
+        if (isEnabled === shouldEnable) return true;
+
+        control.click();
+        await sleep(COLUMN_CLICK_SETTLE_MS);
+
+        return true;
+    }
+
+    async function toggleColumns() {
+        for (const columnClass of COLUMNS_TO_DISABLE) {
+            await setColumnEnabled(columnClass, false);
+        }
+
+        for (const columnClass of COLUMNS_TO_ENABLE) {
+            await setColumnEnabled(columnClass, true);
+        }
+    }
+
+    function closeColumnsPopup() {
+        const popup = findColumnsPopup();
+        const popupCloseControl = popup?.querySelector(
+            '[data-rel="back"], [data-role="close"], .ui-popup-close'
+        );
+
+        if (isClickableElement(popupCloseControl)) {
+            popupCloseControl.click();
             return;
         }
 
-        await toggleColumns();
+        const popupScreen = document.getElementById(COLUMN_POPUP_SCREEN_ID);
 
-        await sleep(CLOSE_POPUP_DELAY_MS);
+        if (isClickableElement(popupScreen)) {
+            popupScreen.click();
+            return;
+        }
 
-        closePopup();
+        const button = document.getElementById(COLUMN_BUTTON_ID);
+
+        if (isClickableElement(button) && isColumnsPopupOpen(popup)) {
+            button.click();
+        }
     }
 
-    if (document.readyState === "complete") {
-        runColumnsController();
-    } else {
-        window.addEventListener("load", runColumnsController, { once: true });
+    async function runColumnsController() {
+        if (state.disposed) return;
+
+        if (state.inFlight) {
+            state.rerunRequested = true;
+            return;
+        }
+
+        state.inFlight = true;
+        state.rerunRequested = false;
+
+        try {
+            const popup = await openColumnsPanel();
+
+            if (!popup) return;
+
+            observeCurrentRoots(popup);
+
+            await toggleColumns();
+            await sleep(CLOSE_POPUP_DELAY_MS);
+            closeColumnsPopup();
+        } finally {
+            state.inFlight = false;
+
+            if (state.rerunRequested) scheduleRun();
+        }
     }
+
+    function scheduleRun() {
+        if (state.disposed) return;
+
+        if (state.runTimer !== null) {
+            clearTimeout(state.runTimer);
+        }
+
+        state.runTimer = window.setTimeout(() => {
+            state.runTimer = null;
+            runColumnsController();
+        }, REPLACEMENT_DEBOUNCE_MS);
+    }
+
+    function mutationContainsControl(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+
+        return node.id === COLUMN_BUTTON_ID ||
+            node.id === COLUMN_POPUP_ID ||
+            Boolean(node.querySelector?.(
+                `#${COLUMN_BUTTON_ID}, #${COLUMN_POPUP_ID}`
+            ));
+    }
+
+    function handleControlMutations(mutations) {
+        if (mutations.some(mutation =>
+            [...mutation.addedNodes, ...mutation.removedNodes]
+                .some(mutationContainsControl)
+        )) {
+            scheduleRun();
+        }
+    }
+
+    function observeRoot(root) {
+        if (state.disposed || !root || state.observedRoots.has(root)) return;
+
+        if (!state.observer) {
+            state.observer = new MutationObserver(handleControlMutations);
+        }
+
+        state.observer.observe(root, { childList: true, subtree: true });
+        state.observedRoots.add(root);
+    }
+
+    function observeCurrentRoots(popup = findColumnsPopup()) {
+        const primaryRoot = document.getElementById('right_container') ||
+            document.getElementById('financial_table_container');
+
+        observeRoot(primaryRoot);
+        observeRoot(primaryRoot?.parentElement);
+        observeRoot(popup?.parentElement);
+    }
+
+    function startReplacementRecovery() {
+        const primaryRoot = document.getElementById('right_container') ||
+            document.getElementById('financial_table_container');
+
+        observeCurrentRoots();
+
+        if (primaryRoot || !document.body) return;
+
+        state.discoveryObserver = new MutationObserver(() => {
+            const discoveredRoot = document.getElementById('right_container') ||
+                document.getElementById('financial_table_container');
+
+            if (!discoveredRoot) return;
+
+            observeCurrentRoots();
+            scheduleRun();
+            state.discoveryObserver?.disconnect();
+            state.discoveryObserver = null;
+
+            if (state.discoveryTimer !== null) {
+                clearTimeout(state.discoveryTimer);
+                state.discoveryTimer = null;
+            }
+        });
+
+        state.discoveryObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        state.discoveryTimer = window.setTimeout(() => {
+            state.discoveryObserver?.disconnect();
+            state.discoveryObserver = null;
+            state.discoveryTimer = null;
+        }, DISCOVERY_TIMEOUT_MS);
+    }
+
+    function cleanup(event) {
+        if (event?.persisted) return;
+
+        state.disposed = true;
+
+        if (state.runTimer !== null) clearTimeout(state.runTimer);
+        if (state.discoveryTimer !== null) clearTimeout(state.discoveryTimer);
+
+        state.observer?.disconnect();
+        state.discoveryObserver?.disconnect();
+        state.observedRoots.clear();
+    }
+
+    startReplacementRecovery();
+    scheduleRun();
+    window.addEventListener('pagehide', cleanup, { once: true });
 
 })();
