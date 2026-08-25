@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.8
-// @description  Adds searchable PRS user selector and restores selected user after PayManager reloads
+// @version      2.9
+// @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
 // @supportURL   mailto:jas@nortronic.com
@@ -44,8 +44,13 @@
     const HANDOFF_MAX_ATTEMPTS = 180;
     const HANDOFF_AREA_SETTLE_MS = 750;
     const HANDOFF_PENDING_SETTLE_MS = 1500;
-    const HANDOFF_RESULTS_SETTLE_MS = 1500;
+    const HANDOFF_TABLE_READY_FALLBACK_MS = 5000;
+    const HANDOFF_FILTER_RESULT_TIMEOUT_MS = 5000;
+    const HANDOFF_PLATE_REAPPLY_MS = 1000;
+    const HANDOFF_MAX_PLATE_DISPATCHES = 3;
     const HANDOFF_STABLE_RESULT_CHECKS = 2;
+    const MANUAL_PLATE_STORAGE_KEY = 'pm_parking_manual_plate_v1';
+    const MANUAL_PLATE_MAX_AGE_MS = 30 * 60 * 1000;
     const PARKING_SEARCH_INPUT_XPATH =
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[4]/label/form/input';
     const PARKING_ENTRIES_INFO_XPATH =
@@ -59,6 +64,7 @@
 
     const UI_ID = 'tm-prs-search-box';
     const INPUT_ID = 'tm-prs-search-input';
+    const PLATE_INPUT_ID = 'tm-parking-license-plate-input';
     const RESULTS_ID = 'tm-prs-search-results';
     const STATUS_ID = 'tm-prs-search-status';
 
@@ -68,6 +74,7 @@
     let outsideClickBound = false;
     let restoring = false;
     let lastAppliedValue = null;
+    let handoffRunId = 0;
 
     function getSelect() {
         return document.getElementById(SELECT_ID);
@@ -148,6 +155,57 @@
         }
     }
 
+    function saveManualPlate(licensePlate) {
+        const normalizedPlate = normalizePlate(licensePlate);
+
+        try {
+            if (!normalizedPlate) {
+                sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
+                return;
+            }
+
+            sessionStorage.setItem(
+                MANUAL_PLATE_STORAGE_KEY,
+                JSON.stringify({
+                    licensePlate: normalizedPlate,
+                    savedAt: Date.now()
+                })
+            );
+        } catch {
+            // The editable field still works when storage is unavailable.
+        }
+    }
+
+    function getSavedManualPlate() {
+        try {
+            const stored = JSON.parse(
+                sessionStorage.getItem(MANUAL_PLATE_STORAGE_KEY)
+            );
+
+            if (
+                stored &&
+                Number.isFinite(stored.savedAt) &&
+                Date.now() - stored.savedAt <= MANUAL_PLATE_MAX_AGE_MS
+            ) {
+                return normalizePlate(stored.licensePlate);
+            }
+
+            sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
+        } catch {
+            // Ignore unavailable or malformed session storage.
+        }
+
+        return '';
+    }
+
+    function setPlateEditorValue(licensePlate) {
+        const input = document.getElementById(PLATE_INPUT_ID);
+
+        if (input) {
+            input.value = normalizePlate(licensePlate);
+        }
+    }
+
     function getRequestedHandoff() {
         const params = new URLSearchParams(location.hash.slice(1));
         const fromUrl = {
@@ -187,6 +245,28 @@
         };
     }
 
+    function getEffectiveHandoff() {
+        const requested = getRequestedHandoff();
+
+        if (requested.licensePlate) {
+            saveManualPlate(requested.licensePlate);
+            setPlateEditorValue(requested.licensePlate);
+            return requested;
+        }
+
+        const manualPlate = getSavedManualPlate();
+
+        if (manualPlate) {
+            setPlateEditorValue(manualPlate);
+            return {
+                areaManager: requested.areaManager,
+                licensePlate: manualPlate
+            };
+        }
+
+        return requested;
+    }
+
     function clearRequestedHandoff() {
         try {
             sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
@@ -206,6 +286,54 @@
             (remainingHash ? `#${remainingHash}` : '');
 
         history.replaceState(history.state, '', cleanUrl);
+    }
+
+    function cancelHandoffSearch() {
+        handoffRunId++;
+
+        if (handoffTimer !== null) {
+            window.clearTimeout(handoffTimer);
+            handoffTimer = null;
+        }
+    }
+
+    function restartParkingSearch(
+        licensePlate,
+        delayMs = 0,
+        preserveRequestedAreaManager = true
+    ) {
+        const normalizedPlate = normalizePlate(licensePlate);
+        const existingHandoff = getRequestedHandoff();
+        const areaManager = preserveRequestedAreaManager
+            ? existingHandoff.areaManager
+            : '';
+
+        cancelHandoffSearch();
+        clearRequestedHandoff();
+        setPlateEditorValue(normalizedPlate);
+        saveManualPlate(normalizedPlate);
+
+        if (!normalizedPlate) {
+            setStatus('Enter a license plate to search.');
+            return false;
+        }
+
+        savePendingHandoff({
+            areaManager,
+            licensePlate: normalizedPlate
+        });
+        setStatus(`Preparing search for: ${normalizedPlate}`);
+
+        if (delayMs > 0) {
+            handoffTimer = window.setTimeout(() => {
+                handoffTimer = null;
+                applyRequestedHandoff();
+            }, delayMs);
+        } else {
+            applyRequestedHandoff();
+        }
+
+        return true;
     }
 
     function getHandoffSignature(handoff) {
@@ -519,7 +647,7 @@
     }
 
     function applyRequestedHandoff() {
-        const initialHandoff = getRequestedHandoff();
+        const initialHandoff = getEffectiveHandoff();
 
         if (!initialHandoff.areaManager && !initialHandoff.licensePlate) {
             return false;
@@ -527,16 +655,21 @@
 
         if (handoffTimer !== null) return true;
 
+        const runId = ++handoffRunId;
         let attempts = 0;
         let areaManagerApplied = !initialHandoff.areaManager;
-        let areaManagerAppliedAt = 0;
-        let lastPlateInput = null;
-        let plateSearchDispatched = false;
-        let plateSearchDispatchedAt = 0;
+        let areaManagerAppliedAt = areaManagerApplied ? Date.now() : 0;
         let parkingStatusClickedAt = 0;
         let parkingStatusClickRequested = false;
         let pendingStatusAttempted =
             wasPendingStatusAttempted(initialHandoff);
+        let tableWaitStartedAt = null;
+        let tableFilterCleared = false;
+        let tableReadyEntriesText = '';
+        let filterStartedAt = null;
+        let lastPlateDispatchAt = 0;
+        let plateDispatchCount = 0;
+        let lastPlateInput = null;
         let lastEntriesText = '';
         let stableResultChecks = 0;
         let failureMessage = 'PayManager did not finish the parking search';
@@ -548,7 +681,14 @@
             );
         }
 
-        function resetResultChecks() {
+        function resetSearchPhase() {
+            tableWaitStartedAt = null;
+            tableFilterCleared = false;
+            tableReadyEntriesText = '';
+            filterStartedAt = null;
+            lastPlateDispatchAt = 0;
+            plateDispatchCount = 0;
+            lastPlateInput = null;
             lastEntriesText = '';
             stableResultChecks = 0;
         }
@@ -580,17 +720,31 @@
 
             areaManagerApplied = true;
             areaManagerAppliedAt = Date.now();
+            resetSearchPhase();
             setStatus(`Selected Area Manager: ${option.label}`, 'green');
             return true;
         }
 
-        function dispatchPlateSearch(input, licensePlate) {
-            setParkingSearchValue(input, licensePlate);
+        function dispatchPlateSearch(input, handoff, isRepeat = false) {
+            if (filterStartedAt === null) {
+                const entriesInfo = getParkingEntriesInfo();
+
+                tableReadyEntriesText = normalizeEntriesText(
+                    entriesInfo?.textContent
+                );
+                filterStartedAt = Date.now();
+            }
+
+            setParkingSearchValue(input, handoff.licensePlate);
             lastPlateInput = input;
-            plateSearchDispatched = true;
-            plateSearchDispatchedAt = Date.now();
-            resetResultChecks();
-            setStatus(`Searching for plate: ${licensePlate}`);
+            lastPlateDispatchAt = Date.now();
+            plateDispatchCount++;
+
+            setStatus(
+                isRepeat
+                    ? `Confirming search for plate: ${handoff.licensePlate}`
+                    : `Searching ${pendingStatusAttempted ? 'Pending' : 'Active'} for: ${handoff.licensePlate}`
+            );
         }
 
         function ensureRequestedParkingStatus(handoff) {
@@ -614,9 +768,7 @@
             if (!parkingStatusClickRequested) {
                 parkingStatusClickRequested = true;
                 parkingStatusClickedAt = Date.now();
-                plateSearchDispatched = false;
-                lastPlateInput = null;
-                resetResultChecks();
+                resetSearchPhase();
                 setStatus(`Switching to ${statusName}...`);
                 button.click();
             }
@@ -624,31 +776,29 @@
             return false;
         }
 
-        function handleStableEntriesResult(handoff, input, entriesText) {
+        function finishCurrentStatusAsEmpty(handoff, input) {
+            if (!pendingStatusAttempted) {
+                markPendingStatusAttempted(handoff);
+                pendingStatusAttempted = true;
+                parkingStatusClickedAt = 0;
+                parkingStatusClickRequested = false;
+                resetSearchPhase();
+                setStatus('No active entries. Switching to Pending...');
+                return false;
+            }
+
+            clearRequestedHandoff();
+            setStatus(
+                `No active or Pending entries found for: ${handoff.licensePlate}`,
+                '#a15c00'
+            );
+            input?.focus();
+            return true;
+        }
+
+        function finishFilteredResult(handoff, input, entriesText) {
             if (isEmptyEntriesText(entriesText)) {
-                pendingStatusAttempted =
-                    pendingStatusAttempted ||
-                    wasPendingStatusAttempted(handoff);
-
-                if (!pendingStatusAttempted) {
-                    markPendingStatusAttempted(handoff);
-                    pendingStatusAttempted = true;
-                    parkingStatusClickedAt = 0;
-                    parkingStatusClickRequested = false;
-                    plateSearchDispatched = false;
-                    lastPlateInput = null;
-                    resetResultChecks();
-                    setStatus('No active entries. Switching to Pending...');
-                    return false;
-                }
-
-                clearRequestedHandoff();
-                setStatus(
-                    `No active or Pending entries found for: ${handoff.licensePlate}`,
-                    '#a15c00'
-                );
-                input.focus();
-                return true;
+                return finishCurrentStatusAsEmpty(handoff, input);
             }
 
             if (!isEntriesSummaryText(entriesText)) {
@@ -657,16 +807,117 @@
             }
 
             clearRequestedHandoff();
-            setStatus(`Ready: ${handoff.licensePlate}`, 'green');
+            setStatus(
+                `Found in ${pendingStatusAttempted ? 'Pending' : 'Active'}: ${handoff.licensePlate}`,
+                'green'
+            );
             input.focus();
             return true;
         }
 
+        function waitForTableAndStartSearch(handoff, input) {
+            const now = Date.now();
+
+            if (tableWaitStartedAt === null) {
+                tableWaitStartedAt = now;
+            }
+
+            if (!tableFilterCleared) {
+                tableFilterCleared = true;
+
+                if (String(input.value || '')) {
+                    setParkingSearchValue(input, '');
+                    tableWaitStartedAt = now;
+                    setStatus(
+                        `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    );
+                    return false;
+                }
+            }
+
+            const entriesInfo = getParkingEntriesInfo();
+            const entriesText = normalizeEntriesText(
+                entriesInfo?.textContent
+            );
+            const counts = getLeadingEntryCounts(entriesText);
+            const tableHasRows = Boolean(
+                counts && (counts.first > 0 || counts.second > 0)
+            );
+            const fallbackElapsed =
+                now - tableWaitStartedAt >= HANDOFF_TABLE_READY_FALLBACK_MS;
+
+            if (!tableHasRows && !fallbackElapsed) {
+                setStatus(
+                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                );
+                return false;
+            }
+
+            if (
+                fallbackElapsed &&
+                entriesText &&
+                isEmptyEntriesText(entriesText)
+            ) {
+                return finishCurrentStatusAsEmpty(handoff, input);
+            }
+
+            dispatchPlateSearch(input, handoff);
+            return false;
+        }
+
+        function checkFilteredResult(handoff, input) {
+            const now = Date.now();
+            const entriesInfo = getParkingEntriesInfo();
+            const entriesText = normalizeEntriesText(
+                entriesInfo?.textContent
+            );
+
+            if (entriesText === lastEntriesText) {
+                stableResultChecks++;
+            } else {
+                lastEntriesText = entriesText;
+                stableResultChecks = entriesText ? 1 : 0;
+            }
+
+            const filterElapsed = now - filterStartedAt;
+            const resultChanged =
+                Boolean(entriesText) &&
+                entriesText !== tableReadyEntriesText;
+
+            if (
+                resultChanged &&
+                !isEmptyEntriesText(entriesText) &&
+                stableResultChecks >= HANDOFF_STABLE_RESULT_CHECKS
+            ) {
+                return finishFilteredResult(handoff, input, entriesText);
+            }
+
+            if (
+                plateDispatchCount < HANDOFF_MAX_PLATE_DISPATCHES &&
+                now - lastPlateDispatchAt >= HANDOFF_PLATE_REAPPLY_MS
+            ) {
+                dispatchPlateSearch(input, handoff, true);
+            }
+
+            if (filterElapsed < HANDOFF_FILTER_RESULT_TIMEOUT_MS) {
+                return false;
+            }
+
+            if (entriesText && isEntriesSummaryText(entriesText)) {
+                return finishFilteredResult(handoff, input, entriesText);
+            }
+
+            failureMessage = 'Parking result summary was not found';
+            return false;
+        }
+
         function attemptSelection() {
+            if (runId !== handoffRunId) return;
+
             handoffTimer = null;
             attempts++;
 
-            const handoff = getRequestedHandoff();
+            const handoff = getEffectiveHandoff();
 
             if (!handoff.areaManager && !handoff.licensePlate) return;
 
@@ -690,50 +941,21 @@
             if (parkingStatusReady && parkingStatusSettled) {
                 const input = getParkingSearchInput();
 
-                if (input) {
+                if (!input) {
+                    failureMessage = 'Parking search input was not found';
+                } else if (filterStartedAt === null) {
+                    if (waitForTableAndStartSearch(handoff, input)) return;
+                } else {
                     const currentPlate = normalizePlate(input.value);
 
                     if (
-                        !plateSearchDispatched ||
                         input !== lastPlateInput ||
                         currentPlate !== handoff.licensePlate
                     ) {
-                        dispatchPlateSearch(input, handoff.licensePlate);
-                    } else if (
-                        Date.now() - plateSearchDispatchedAt >=
-                        HANDOFF_RESULTS_SETTLE_MS
-                    ) {
-                        const entriesInfo = getParkingEntriesInfo();
-                        const entriesText = normalizeEntriesText(
-                            entriesInfo?.textContent
-                        );
-
-                        if (entriesText) {
-                            if (entriesText === lastEntriesText) {
-                                stableResultChecks++;
-                            } else {
-                                lastEntriesText = entriesText;
-                                stableResultChecks = 1;
-                            }
-
-                            if (
-                                stableResultChecks >=
-                                HANDOFF_STABLE_RESULT_CHECKS &&
-                                handleStableEntriesResult(
-                                    handoff,
-                                    input,
-                                    entriesText
-                                )
-                            ) {
-                                return;
-                            }
-                        } else {
-                            failureMessage =
-                                'Parking result summary was not found';
-                        }
+                        dispatchPlateSearch(input, handoff, true);
                     }
-                } else {
-                    failureMessage = 'Parking search input was not found';
+
+                    if (checkFilteredResult(handoff, input)) return;
                 }
             }
 
@@ -747,6 +969,23 @@
         }
 
         attemptSelection();
+        return true;
+    }
+
+    function applyUserAndRestartParkingSearch(value, label) {
+        if (!applyUser(value, label, true)) {
+            return false;
+        }
+
+        const plateInput = document.getElementById(PLATE_INPUT_ID);
+        const licensePlate = normalizePlate(
+            plateInput?.value || getSavedManualPlate()
+        );
+
+        if (licensePlate) {
+            restartParkingSearch(licensePlate, 1000, false);
+        }
+
         return true;
     }
 
@@ -909,6 +1148,30 @@
                 "
             ></div>
 
+            <div style="font-weight:bold; margin:10px 0 6px;">
+                Search License Plate
+            </div>
+
+            <input
+                id="${PLATE_INPUT_ID}"
+                type="text"
+                placeholder="Enter license plate..."
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="characters"
+                spellcheck="false"
+                data-form-type="other"
+                style="
+                    width:100%;
+                    box-sizing:border-box;
+                    padding:8px;
+                    border:1px solid #999;
+                    border-radius:4px;
+                    font-size:14px;
+                    text-transform:uppercase;
+                "
+            >
+
             <div
                 id="${STATUS_ID}"
                 style="
@@ -931,6 +1194,12 @@
         }
 
         bindSearchEvents();
+
+        const requestedHandoff = getEffectiveHandoff();
+
+        if (requestedHandoff.licensePlate) {
+            setPlateEditorValue(requestedHandoff.licensePlate);
+        }
 
         const currentOption =
             select.options[select.selectedIndex];
@@ -958,6 +1227,56 @@
             document.getElementById(RESULTS_ID);
 
         if (!input || !resultsBox) return;
+
+        const plateInput = document.getElementById(PLATE_INPUT_ID);
+        let plateSearchTimer = null;
+
+        function submitPlateSearch() {
+            if (!plateInput) return;
+
+            if (plateSearchTimer !== null) {
+                window.clearTimeout(plateSearchTimer);
+                plateSearchTimer = null;
+            }
+
+            const licensePlate = normalizePlate(plateInput.value);
+
+            plateInput.value = licensePlate;
+            restartParkingSearch(licensePlate);
+        }
+
+        if (plateInput) {
+            plateInput.addEventListener('input', () => {
+                const licensePlate = normalizePlate(plateInput.value);
+
+                saveManualPlate(licensePlate);
+                setStatus(
+                    licensePlate
+                        ? `Preparing search for: ${licensePlate}`
+                        : 'Enter a license plate to search.'
+                );
+
+                if (plateSearchTimer !== null) {
+                    window.clearTimeout(plateSearchTimer);
+                }
+
+                plateSearchTimer = window.setTimeout(
+                    submitPlateSearch,
+                    600
+                );
+            });
+
+            plateInput.addEventListener('keydown', event => {
+                if (event.key !== 'Enter') return;
+
+                event.preventDefault();
+                submitPlateSearch();
+            });
+
+            plateInput.addEventListener('blur', () => {
+                plateInput.value = normalizePlate(plateInput.value);
+            });
+        }
 
         let activeIndex = -1;
         let currentMatches = [];
@@ -1039,10 +1358,9 @@
                     row.addEventListener(
                         'click',
                         () => {
-                            applyUser(
+                            applyUserAndRestartParkingSearch(
                                 item.value,
-                                item.label,
-                                true
+                                item.label
                             );
 
                             resultsBox.style.display =
@@ -1174,14 +1492,13 @@
                         activeIndex
                         ]
                     ) {
-                        applyUser(
+                        applyUserAndRestartParkingSearch(
                             currentMatches[
                                 activeIndex
                             ].value,
                             currentMatches[
                                 activeIndex
-                            ].label,
-                            true
+                            ].label
                         );
 
                         resultsBox.style.display =
@@ -1193,12 +1510,11 @@
                     if (
                         currentMatches.length > 0
                     ) {
-                        applyUser(
+                        applyUserAndRestartParkingSearch(
                             currentMatches[0]
                                 .value,
                             currentMatches[0]
-                                .label,
-                            true
+                                .label
                         );
 
                         resultsBox.style.display =
