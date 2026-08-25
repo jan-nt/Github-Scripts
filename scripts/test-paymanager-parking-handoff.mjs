@@ -17,8 +17,11 @@ const testSource = `${source.slice(0, initIndex)}
         applyUser,
         restartParkingSearch,
         getEffectiveHandoff,
-        getSavedManualPlate,
-        saveManualPlate,
+        bindPlateSearchEvents,
+        cancelPlateSearch,
+        clearLegacyManualPlateState,
+        guardBlankPlateEditor,
+        isValidPlate,
         isEmptyEntriesText,
         isEntriesSummaryText,
         startInitialHandoffOrRestore,
@@ -178,9 +181,12 @@ function createHandoffScenario({
     };
 
     class FakeInput {
-        constructor() {
+        constructor(isTableFilter = false) {
             this._value = '';
             this.focused = false;
+            this.isConnected = true;
+            this.isTableFilter = isTableFilter;
+            this.listeners = new Map();
         }
 
         get value() {
@@ -191,7 +197,33 @@ function createHandoffScenario({
             this._value = String(value);
         }
 
+        addEventListener(type, listener) {
+            const listeners = this.listeners.get(type) || [];
+            listeners.push(listener);
+            this.listeners.set(type, listeners);
+        }
+
+        removeAttribute() {}
+
+        emit(type, properties = {}) {
+            const event = {
+                type,
+                isTrusted: true,
+                key: '',
+                preventDefault() {},
+                ...properties
+            };
+
+            for (const listener of this.listeners.get(type) || []) {
+                listener(event);
+            }
+        }
+
         dispatchEvent(event) {
+            for (const listener of this.listeners.get(event.type) || []) {
+                listener(event);
+            }
+
             dispatchedEvents.push({
                 type: event.type,
                 value: this.value,
@@ -199,7 +231,7 @@ function createHandoffScenario({
                 at: clock
             });
 
-            if (event.type === 'input') {
+            if (this.isTableFilter && event.type === 'input') {
                 if (!this.value) {
                     entriesInfo.textContent = currentInitialText();
                     showInitialRows();
@@ -228,7 +260,7 @@ function createHandoffScenario({
         }
     }
 
-    const input = new FakeInput();
+    const input = new FakeInput(true);
     const plateEditor = new FakeInput();
     const activeClasses = new Set(
         initialStatus === 'active' ? ['active_tab'] : []
@@ -617,38 +649,100 @@ assert.equal(
     false
 );
 
-// An explicit area-only handoff must not inherit a stale manual plate.
+// An explicit area-only handoff must not inherit legacy manual plate storage.
 const areaOnly = createHandoffScenario({
     locationHash: '#tmAreaManager=Example%20Manager'
 });
 
-areaOnly.api.saveManualPlate('STALE123');
+areaOnly.setSessionValue(
+    'pm_parking_manual_plate_v1',
+    JSON.stringify({ licensePlate: 'STALE123', savedAt: 0 })
+);
+areaOnly.api.clearLegacyManualPlateState();
 const areaOnlyHandoff = areaOnly.api.getEffectiveHandoff();
 
 assert.equal(areaOnlyHandoff.areaManager, 'Example Manager');
 assert.equal(areaOnlyHandoff.licensePlate, '');
 assert.equal(areaOnlyHandoff.explicit, true);
-assert.equal(areaOnly.api.getSavedManualPlate(), '');
+assert.equal(areaOnly.hasSessionValue('pm_parking_manual_plate_v1'), false);
 
-// A manual resume restores the saved PRS before it searches the table.
-const manualResume = createHandoffScenario({ locationHash: '' });
+// Normal parking review restores only the PRS user and starts no plate search.
+const normalReview = createHandoffScenario({ locationHash: '' });
 
-manualResume.api.saveManualPlate('MANUAL123');
-manualResume.saveSelectedUser('manager-2');
-manualResume.api.startInitialHandoffOrRestore();
+normalReview.setSessionValue(
+    'pm_parking_manual_plate_v1',
+    JSON.stringify({ licensePlate: 'OLD123', savedAt: 0 })
+);
+normalReview.setSessionValue(
+    'pm_parking_handoff_v1',
+    JSON.stringify({
+        areaManager: '',
+        licensePlate: 'OLD123',
+        explicit: false,
+        savedAt: 0
+    })
+);
+normalReview.setSessionValue(
+    'pm_parking_handoff_pending_v1',
+    '["","OLD123"]'
+);
+normalReview.api.clearLegacyManualPlateState();
+normalReview.saveSelectedUser('manager-2');
+normalReview.api.startInitialHandoffOrRestore();
 
-assert.equal(manualResume.select.value, 'manager-1');
-assert.equal(manualResume.getActivePlateDispatches(), 0);
+assert.equal(normalReview.select.value, 'manager-1');
+assert.equal(normalReview.getActivePlateDispatches(), 0);
 
-manualResume.runTimers();
+normalReview.runTimers();
 
-assert.equal(manualResume.select.value, 'manager-2');
+assert.equal(normalReview.select.value, 'manager-2');
 assert.equal(
-    manualResume.select.dispatchedEvents.filter(type => type === 'change').length,
+    normalReview.select.dispatchedEvents.filter(type => type === 'change').length,
     1
 );
-assert.equal(manualResume.input.value, 'MANUAL123');
-assert.equal(manualResume.status.textContent, 'Found in Active: MANUAL123');
+assert.equal(normalReview.input.value, '');
+assert.equal(normalReview.plateEditor.value, '');
+assert.equal(normalReview.getActivePlateDispatches(), 0);
+assert.equal(normalReview.hasSessionValue('pm_parking_handoff_v1'), false);
+assert.equal(
+    normalReview.hasSessionValue('pm_parking_handoff_pending_v1'),
+    false
+);
+
+// Browser autofill is scrubbed before user activation and cannot trigger Ajax.
+const dynamicPlate = createHandoffScenario({ locationHash: '' });
+dynamicPlate.api.bindPlateSearchEvents(dynamicPlate.plateEditor);
+dynamicPlate.plateEditor.value = 'jas@nortronic.com';
+dynamicPlate.plateEditor.emit('input');
+assert.equal(dynamicPlate.plateEditor.value, '');
+assert.equal(dynamicPlate.getActivePlateDispatches(), 0);
+assert.equal(dynamicPlate.api.isValidPlate('jas@nortronic.com'), false);
+
+dynamicPlate.plateEditor.value = 'autofilled@example.com';
+dynamicPlate.api.guardBlankPlateEditor(dynamicPlate.plateEditor);
+dynamicPlate.runTimers();
+assert.equal(dynamicPlate.plateEditor.value, '');
+
+// User typing starts a guarded search; deleting the value cancels and clears it.
+dynamicPlate.plateEditor.emit('pointerdown');
+dynamicPlate.plateEditor.value = ' xy-123 ';
+dynamicPlate.plateEditor.emit('input');
+dynamicPlate.runTimers();
+assert.equal(dynamicPlate.input.value, 'XY123');
+assert.equal(dynamicPlate.status.textContent, 'Found in Active: XY123');
+assert.equal(
+    dynamicPlate.getDispatchedEvents().every(event => event.type === 'input'),
+    true,
+    'plate automation must not emit redundant keyup/search/change events'
+);
+
+dynamicPlate.plateEditor.value = '';
+dynamicPlate.plateEditor.emit('input');
+assert.equal(dynamicPlate.input.value, '');
+assert.equal(
+    dynamicPlate.status.textContent,
+    'License-plate search is inactive.'
+);
 
 // Changing the editable plate starts the same guarded search again.
 assert.equal(activeMatch.api.restartParkingSearch(' alt-456 '), true);
@@ -656,7 +750,6 @@ activeMatch.runTimers();
 
 assert.equal(activeMatch.input.value, 'ALT456');
 assert.equal(activeMatch.plateEditor.value, 'ALT456');
-assert.equal(activeMatch.api.getSavedManualPlate(), 'ALT456');
 assert.equal(activeMatch.status.textContent, 'Found in Active: ALT456');
 
 assert.equal(

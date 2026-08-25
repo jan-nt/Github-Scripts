@@ -31,7 +31,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 | PassPay UserAdmin | 1.9.1 | PassPay administration | Adds safe Chain ID and Payment ID links and a focused admin search action. |
 | PayManager Column Controller | 1.2.1 | PayManager transactions | Automatically enforces the configured transaction-column visibility. |
 | PayManager Image Row Highlighter | 1.7.1 | PayManager transactions | Highlights rows that contain event-camera images. |
-| PayManager Parking User Selector | 2.9.1 | PayManager parking | Restores the selected PRS user and performs guarded Active/Pending plate searches. |
+| PayManager Parking User Selector | 2.9.2 | PayManager parking | Restores the selected PRS user and performs opt-in, guarded Active/Pending plate searches. |
 | PayManager Search Input Normalizer | 1.0.1 | PayManager transactions and parking | Removes spaces and dashes from typed filter text. |
 
 ## Privacy and security
@@ -40,7 +40,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 - The session keeper checks whether required login fields are complete before clicking an existing login button. It does not copy, store, log, or transmit credential values.
 - Extracted license plates and parking details are stored only in the current PassPay/ParkPay tab's session storage. They are removed after 30 minutes and are also discarded when that tab's browser session ends. The current script also removes the older persistent cache after migrating any still-valid entry.
 - Area Manager and license-plate handoffs use a URL fragment. Fragments are not included in HTTP requests. The receiving script keeps a session-only recovery copy for at most five minutes and removes both the copy and fragment after use or expiry. Page scripts and browser extensions can still read a fragment while it is present.
-- The editable PayManager parking license-plate field keeps its current value in that tab's session storage for up to 30 minutes so a PRS-user or table reload can resume the guarded search. It is not written to persistent local storage.
+- The editable PayManager parking license-plate field is blank during normal browsing and is not persisted. An explicit PassPay handoff can retain its recovery copy in session storage for at most five minutes, as described above.
 - Chain IDs and payment IDs opened in another portal are placed in that portal's query string and can appear in browser history and service logs.
 - Only the identifier for the last selected PayManager parking user is stored in PayManager's local browser storage. The display label is derived from the page instead of being persisted. The script treats the identifier as expired after 30 days and removes it the next time it checks the stored value.
 - PassPay Search Admin Panel loads the version-pinned html2canvas 1.4.1 file from jsDelivr for local screenshot creation and verifies it with a SHA-256 integrity hash.
@@ -74,6 +74,13 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-08-25 PayManager parking search 2.9.2
+
+- Made license-plate searching opt-in and blank by default during normal parking review.
+- Rejected password-manager and browser-autofill values containing non-plate characters, including email addresses.
+- Made deleting the editable plate cancel the Active/Pending workflow and clear the DataTables filter.
+- Removed the previous 30-minute manual-plate persistence and reduced redundant filter/select events that could cause duplicate Ajax reloads.
 
 ### 2026-08-25 production audit
 
