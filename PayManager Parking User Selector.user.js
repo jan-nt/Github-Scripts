@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.9.1
+// @version      2.9.2
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -55,7 +55,6 @@
     const HANDOFF_MAX_PLATE_DISPATCHES = 3;
     const HANDOFF_STABLE_RESULT_CHECKS = 2;
     const MANUAL_PLATE_STORAGE_KEY = 'pm_parking_manual_plate_v1';
-    const MANUAL_PLATE_MAX_AGE_MS = 30 * 60 * 1000;
     const PARKING_SEARCH_INPUT_XPATH =
         '/html/body/div[2]/div[2]/div/div[4]/div[2]/div/div[4]/label/form/input';
     const PARKING_ENTRIES_INFO_XPATH =
@@ -82,7 +81,6 @@
     let handoffTimer = null;
     let outsideClickBound = false;
     let restoring = false;
-    let lastAppliedValue = null;
     let handoffRunId = 0;
     let plateSearchTimer = null;
     let restoreTimer = null;
@@ -92,6 +90,8 @@
     let latestTableAction = null;
     let panelObserver = null;
     let panelCheckScheduled = false;
+    let activeManualHandoff = null;
+    let plateEditorActivated = false;
 
     function getSelect() {
         return document.getElementById(SELECT_ID);
@@ -122,6 +122,14 @@
                 /[\s\u00A0\u2007\u202F\u2010-\u2015\u2212\uFE58\uFE63\uFF0D-]+/g,
                 ''
             );
+    }
+
+    function isValidPlate(value) {
+        return /^[A-Z0-9]{2,20}$/.test(normalizePlate(value));
+    }
+
+    function hasOnlyPlateCharacters(value) {
+        return /^[A-Z0-9]*$/.test(normalizePlate(value));
     }
 
     function escapeHtml(value) {
@@ -172,42 +180,24 @@
         }
     }
 
-    function saveManualPlate(licensePlate) {
-        const normalizedPlate = normalizePlate(licensePlate);
-
+    function clearLegacyManualPlateState() {
         try {
-            if (!normalizedPlate) {
-                sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
-                return;
-            }
-
-            sessionStorage.setItem(
-                MANUAL_PLATE_STORAGE_KEY,
-                JSON.stringify({
-                    licensePlate: normalizedPlate,
-                    savedAt: Date.now()
-                })
-            );
-        } catch {
-            // The editable field still works when storage is unavailable.
-        }
-    }
-
-    function getSavedManualPlate() {
-        try {
-            const stored = JSON.parse(
-                sessionStorage.getItem(MANUAL_PLATE_STORAGE_KEY)
-            );
-
-            if (
-                stored &&
-                Number.isFinite(stored.savedAt) &&
-                Date.now() - stored.savedAt <= MANUAL_PLATE_MAX_AGE_MS
-            ) {
-                return normalizePlate(stored.licensePlate);
-            }
-
             sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
+
+            const storedHandoff = JSON.parse(
+                sessionStorage.getItem(HANDOFF_STORAGE_KEY)
+            );
+            const isLegacyManualHandoff = Boolean(
+                storedHandoff &&
+                storedHandoff.licensePlate &&
+                !storedHandoff.explicit &&
+                !String(storedHandoff.areaManager || '').trim()
+            );
+
+            if (isLegacyManualHandoff) {
+                sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+                sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+            }
         } catch {
             try {
                 sessionStorage.removeItem(MANUAL_PLATE_STORAGE_KEY);
@@ -215,8 +205,6 @@
                 // Ignore unavailable session storage.
             }
         }
-
-        return '';
     }
 
     function setPlateEditorValue(licensePlate) {
@@ -232,13 +220,25 @@
         const hasUrlHandoff =
             params.has(AREA_MANAGER_PARAM) ||
             params.has(LICENSE_PLATE_PARAM);
+        const urlPlate = normalizePlate(
+            params.get(LICENSE_PLATE_PARAM)
+        );
         const fromUrl = {
             areaManager: String(params.get(AREA_MANAGER_PARAM) || '').trim(),
-            licensePlate: normalizePlate(params.get(LICENSE_PLATE_PARAM)),
+            licensePlate: isValidPlate(urlPlate) ? urlPlate : '',
             explicit: hasUrlHandoff
         };
 
         if (hasUrlHandoff) {
+            if (!fromUrl.areaManager && !fromUrl.licensePlate) {
+                clearRequestedHandoff();
+                return {
+                    areaManager: '',
+                    licensePlate: '',
+                    explicit: false
+                };
+            }
+
             savePendingHandoff(fromUrl);
             return fromUrl;
         }
@@ -253,9 +253,26 @@
                 Number.isFinite(stored.savedAt) &&
                 Date.now() - stored.savedAt <= HANDOFF_MAX_AGE_MS
             ) {
+                const storedPlate = normalizePlate(stored.licensePlate);
+                const areaManager = String(
+                    stored.areaManager || ''
+                ).trim();
+
+                if (!areaManager && !isValidPlate(storedPlate)) {
+                    sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+                    sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                    return {
+                        areaManager: '',
+                        licensePlate: '',
+                        explicit: false
+                    };
+                }
+
                 return {
-                    areaManager: String(stored.areaManager || '').trim(),
-                    licensePlate: normalizePlate(stored.licensePlate),
+                    areaManager,
+                    licensePlate: isValidPlate(storedPlate)
+                        ? storedPlate
+                        : '',
                     explicit: Boolean(
                         stored.explicit || stored.areaManager
                     )
@@ -283,27 +300,14 @@
     function getEffectiveHandoff() {
         const requested = getRequestedHandoff();
 
-        if (requested.explicit) {
-            saveManualPlate(requested.licensePlate);
+        if (requested.areaManager || requested.licensePlate) {
             setPlateEditorValue(requested.licensePlate);
             return requested;
         }
 
-        if (requested.licensePlate) {
-            saveManualPlate(requested.licensePlate);
-            setPlateEditorValue(requested.licensePlate);
-            return requested;
-        }
-
-        const manualPlate = getSavedManualPlate();
-
-        if (manualPlate) {
-            setPlateEditorValue(manualPlate);
-            return {
-                areaManager: requested.areaManager,
-                licensePlate: manualPlate,
-                explicit: false
-            };
+        if (activeManualHandoff) {
+            setPlateEditorValue(activeManualHandoff.licensePlate);
+            return activeManualHandoff;
         }
 
         return requested;
@@ -318,6 +322,7 @@
         }
 
         latestTableAction = null;
+        activeManualHandoff = null;
 
         const params = new URLSearchParams(location.hash.slice(1));
         params.delete(AREA_MANAGER_PARAM);
@@ -366,22 +371,21 @@
         cancelHandoffSearch();
         clearRequestedHandoff();
         setPlateEditorValue(normalizedPlate);
-        saveManualPlate(normalizedPlate);
 
-        if (!normalizedPlate) {
-            setStatus('Enter a license plate to search.');
+        if (!isValidPlate(normalizedPlate)) {
+            setStatus(
+                normalizedPlate
+                    ? 'Enter a valid license plate using letters and numbers.'
+                    : 'License-plate search is inactive.'
+            );
             return false;
         }
 
-        savePendingHandoff({
+        activeManualHandoff = {
             areaManager,
             licensePlate: normalizedPlate,
-            explicit: Boolean(
-                preserveRequestedAreaManager &&
-                existingHandoff.explicit &&
-                areaManager
-            )
-        });
+            explicit: false
+        };
         setStatus(`Preparing search for: ${normalizedPlate}`);
 
         if (delayMs > 0) {
@@ -394,6 +398,26 @@
         }
 
         return true;
+    }
+
+    function cancelPlateSearch(
+        message = 'License-plate search is inactive.',
+        clearEditor = false
+    ) {
+        cancelHandoffSearch();
+        clearRequestedHandoff();
+
+        if (clearEditor) {
+            setPlateEditorValue('');
+        }
+
+        const parkingInput = getParkingSearchInput();
+
+        if (parkingInput && String(parkingInput.value || '')) {
+            setParkingSearchValue(parkingInput, '');
+        }
+
+        setStatus(message);
     }
 
     function getHandoffSignature(handoff) {
@@ -673,9 +697,7 @@
             input.value = licensePlate;
         }
 
-        ['input', 'keyup', 'search', 'change'].forEach(type => {
-            input.dispatchEvent(new Event(type, { bubbles: true }));
-        });
+        input.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
     function findAreaManagerOption(areaManager) {
@@ -734,11 +756,7 @@
     }
 
     function fireSelectEvents(select) {
-        [
-            new Event('input', { bubbles: true }),
-            new Event('change', { bubbles: true }),
-            new Event('blur', { bubbles: true })
-        ].forEach(event => select.dispatchEvent(event));
+        select.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function saveSelectedUser(value) {
@@ -811,14 +829,17 @@
             return false;
         }
 
-        if (
-            lastAppliedValue === option.value &&
-            select.value === option.value
-        ) {
+        if (select.value === option.value) {
+            updateJqueryMobileButton(option.label);
+
+            const input = document.getElementById(INPUT_ID);
+            if (input) input.value = option.label;
+
+            if (shouldSave) saveSelectedUser(option.value);
+
+            setStatus(`Selected: ${option.label} (${option.value})`, 'green');
             return true;
         }
-
-        lastAppliedValue = option.value;
 
         beginTableReloadAction();
         select.value = option.value;
@@ -1346,9 +1367,7 @@
         }
 
         const plateInput = document.getElementById(PLATE_INPUT_ID);
-        const licensePlate = normalizePlate(
-            plateInput?.value || getSavedManualPlate()
-        );
+        const licensePlate = normalizePlate(plateInput?.value);
 
         if (licensePlate) {
             restartParkingSearch(licensePlate, 1000, false);
@@ -1357,11 +1376,15 @@
         return true;
     }
 
-    function preventPasswordManager(input, fieldName) {
+    function preventPasswordManager(
+        input,
+        fieldName,
+        autocomplete = 'off'
+    ) {
         if (!input) return;
 
         input.name = fieldName;
-        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('autocomplete', autocomplete);
         input.setAttribute('data-form-type', 'other');
         input.setAttribute('data-1p-ignore', 'true');
         input.setAttribute('data-lpignore', 'true');
@@ -1375,8 +1398,23 @@
         );
         preventPasswordManager(
             document.getElementById(PLATE_INPUT_ID),
-            'tm-license-plate-filter'
+            'tm-parking-plate-query',
+            'one-time-code'
         );
+    }
+
+    function guardBlankPlateEditor(input) {
+        [0, 100, 500, 1500, 3000].forEach(delay => {
+            window.setTimeout(() => {
+                if (
+                    input?.isConnected !== false &&
+                    !plateEditorActivated &&
+                    !activeManualHandoff
+                ) {
+                    input.value = '';
+                }
+            }, delay);
+        });
     }
 
     function createSearchUi() {
@@ -1396,6 +1434,8 @@
         if (document.getElementById(UI_ID)) {
             return true;
         }
+
+        plateEditorActivated = false;
 
         const wrapper = document.createElement('div');
 
@@ -1459,11 +1499,13 @@
                 id="${PLATE_INPUT_ID}"
                 type="text"
                 placeholder="Enter license plate..."
-                autocomplete="off"
+                name="tm-parking-plate-query"
+                autocomplete="one-time-code"
                 autocorrect="off"
                 autocapitalize="characters"
                 spellcheck="false"
                 data-form-type="other"
+                readonly
                 style="
                     width:100%;
                     box-sizing:border-box;
@@ -1496,12 +1538,20 @@
             target.prepend(wrapper);
         }
 
+        applyPasswordManagerDefense();
         bindSearchEvents();
 
         const requestedHandoff = getEffectiveHandoff();
 
         if (requestedHandoff.licensePlate) {
             setPlateEditorValue(requestedHandoff.licensePlate);
+        } else {
+            const plateInput = document.getElementById(PLATE_INPUT_ID);
+
+            if (plateInput) {
+                plateInput.value = '';
+                guardBlankPlateEditor(plateInput);
+            }
         }
 
         const currentOption =
@@ -1516,10 +1566,103 @@
             );
         }
 
-        // Apply aggressive anti-password-manager measures
-        applyPasswordManagerDefense();
-
         return true;
+    }
+
+    function bindPlateSearchEvents(plateInput) {
+        if (!plateInput) return;
+
+        function submitPlateSearch() {
+            if (plateSearchTimer !== null) {
+                window.clearTimeout(plateSearchTimer);
+                plateSearchTimer = null;
+            }
+
+            const licensePlate = normalizePlate(plateInput.value);
+
+            plateInput.value = licensePlate;
+
+            if (!hasOnlyPlateCharacters(licensePlate)) {
+                plateInput.value = '';
+                cancelPlateSearch(
+                    'Enter a valid license plate using letters and numbers.'
+                );
+                return;
+            }
+
+            if (!isValidPlate(licensePlate)) {
+                cancelPlateSearch(
+                    licensePlate
+                        ? 'Enter a valid license plate using letters and numbers.'
+                        : 'License-plate search is inactive.'
+                );
+                return;
+            }
+
+            restartParkingSearch(licensePlate);
+        }
+
+        function activatePlateEditor(event) {
+            if (event.isTrusted !== false) {
+                plateEditorActivated = true;
+                plateInput.removeAttribute('readonly');
+            }
+        }
+
+        plateInput.addEventListener('pointerdown', activatePlateEditor);
+        plateInput.addEventListener('paste', activatePlateEditor);
+        plateInput.addEventListener('drop', activatePlateEditor);
+
+        plateInput.addEventListener('input', event => {
+            if (!plateEditorActivated) {
+                plateInput.value = '';
+                return;
+            }
+
+            const licensePlate = normalizePlate(plateInput.value);
+            plateInput.value = licensePlate;
+
+            if (plateSearchTimer !== null) {
+                window.clearTimeout(plateSearchTimer);
+                plateSearchTimer = null;
+            }
+
+            if (!hasOnlyPlateCharacters(licensePlate)) {
+                plateInput.value = '';
+                cancelPlateSearch(
+                    'Enter a valid license plate using letters and numbers.'
+                );
+                return;
+            }
+
+            if (!licensePlate) {
+                cancelPlateSearch();
+                return;
+            }
+
+            if (!isValidPlate(licensePlate)) {
+                cancelPlateSearch(
+                    'Enter a valid license plate using letters and numbers.'
+                );
+                return;
+            }
+
+            cancelPlateSearch(`Preparing search for: ${licensePlate}`);
+            plateSearchTimer = window.setTimeout(submitPlateSearch, 600);
+        });
+
+        plateInput.addEventListener('keydown', event => {
+            activatePlateEditor(event);
+
+            if (event.key !== 'Enter') return;
+
+            event.preventDefault();
+            submitPlateSearch();
+        });
+
+        plateInput.addEventListener('blur', () => {
+            plateInput.value = normalizePlate(plateInput.value);
+        });
     }
 
     function bindSearchEvents() {
@@ -1533,52 +1676,7 @@
 
         const plateInput = document.getElementById(PLATE_INPUT_ID);
 
-        function submitPlateSearch() {
-            if (!plateInput) return;
-
-            if (plateSearchTimer !== null) {
-                window.clearTimeout(plateSearchTimer);
-                plateSearchTimer = null;
-            }
-
-            const licensePlate = normalizePlate(plateInput.value);
-
-            plateInput.value = licensePlate;
-            restartParkingSearch(licensePlate);
-        }
-
-        if (plateInput) {
-            plateInput.addEventListener('input', () => {
-                const licensePlate = normalizePlate(plateInput.value);
-
-                saveManualPlate(licensePlate);
-                setStatus(
-                    licensePlate
-                        ? `Preparing search for: ${licensePlate}`
-                        : 'Enter a license plate to search.'
-                );
-
-                if (plateSearchTimer !== null) {
-                    window.clearTimeout(plateSearchTimer);
-                }
-
-                plateSearchTimer = window.setTimeout(
-                    submitPlateSearch,
-                    600
-                );
-            });
-
-            plateInput.addEventListener('keydown', event => {
-                if (event.key !== 'Enter') return;
-
-                event.preventDefault();
-                submitPlateSearch();
-            });
-
-            plateInput.addEventListener('blur', () => {
-                plateInput.value = normalizePlate(plateInput.value);
-            });
-        }
+        bindPlateSearchEvents(plateInput);
 
         let activeIndex = -1;
         let currentMatches = [];
@@ -1852,34 +1950,6 @@
     }
 
     function startInitialHandoffOrRestore() {
-        const initialHandoff = getEffectiveHandoff();
-        const isManualResume = Boolean(
-            initialHandoff.licensePlate &&
-            !initialHandoff.areaManager &&
-            !initialHandoff.explicit
-        );
-
-        if (isManualResume) {
-            const restoreScheduled = restoreLastSelectedUser(
-                restored => {
-                    if (restored) {
-                        applyRequestedHandoff();
-                    } else {
-                        setStatus(
-                            'Saved PRS user was not available. Select a PRS user to resume the plate search.',
-                            'red'
-                        );
-                    }
-                }
-            );
-
-            if (!restoreScheduled) {
-                applyRequestedHandoff();
-            }
-
-            return;
-        }
-
         if (!applyRequestedHandoff()) {
             restoreLastSelectedUser();
         }
@@ -1979,6 +2049,7 @@
         watchForPanelReloads();
     }
 
+    clearLegacyManualPlateState();
     init();
 
     if (document.body) {
