@@ -1563,7 +1563,7 @@
                 <input
                     id="${PLATE_INPUT_ID}"
                     type="text"
-                    placeholder="Enter license plate..."
+                    placeholder="Search license plate..."
                     name="tm-parking-plate-query"
                     autocomplete="one-time-code"
                     autocorrect="off"
