@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      2.0.1
+// @version      2.0.2
 // @description  Adds safe admin search links and an explicitly armed batch-refund workflow
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -1606,6 +1606,17 @@
             .at(-1) || null;
     }
 
+    function getPortalPostSubmitOutcome(
+        expectedPaymentId,
+        verified = portalRefundIsVerified()
+    ) {
+        if (verified) return 'verified';
+
+        return getCurrentDibsPaymentId() === expectedPaymentId
+            ? null
+            : 'navigated';
+    }
+
     function navigateToPortalQueueItem(queue) {
         if (portalCancelled) return;
 
@@ -1695,7 +1706,7 @@
         if (item.state === 'submitted') {
             const verified = await waitForCondition(
                 portalRefundIsVerified,
-                20000,
+                45000,
                 250
             );
 
@@ -1771,15 +1782,26 @@
 
         confirmation.button.click();
 
-        const verified = await waitForCondition(
-            portalRefundIsVerified,
+        const postSubmitOutcome = await waitForCondition(
+            () => getPortalPostSubmitOutcome(item.paymentId),
             45000,
             250
         );
 
         if (portalCancelled) return;
 
-        if (!verified) {
+        if (postSubmitOutcome === 'navigated') {
+            renderPortalStatus(
+                `Refund ${queue.index + 1} was submitted. ` +
+                'Reopening it for verification before continuing...',
+                { showCancel: true }
+            );
+            portalProcessing = false;
+            navigateToPortalQueueItem(queue);
+            return;
+        }
+
+        if (postSubmitOutcome !== 'verified') {
             stopPortalBatch(
                 'DIBS did not confirm both Refundert status and the expected ' +
                 `${DIBS_LOGIN_EMAIL} refund event within 45 seconds.`

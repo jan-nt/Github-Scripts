@@ -18,6 +18,7 @@ const isolatedSource = `${scriptSource.slice(0, startupIndex)}
         handleRemoveSpacesClick,
         injectStyles,
         getPaymentIdFromHref,
+        getPortalPostSubmitOutcome,
         isPortalRefundActionLabel,
         isPaymentHistoryPage,
         isRefundableStatus,
@@ -470,6 +471,26 @@ assert.equal(
     examplePaymentId
 );
 assert.equal(api.getPaymentIdFromHref('https://example.com/not-a-payment'), null);
+
+scenario.location.pathname =
+    `/portal-frontend/payments/${examplePaymentId}`;
+assert.equal(
+    api.getPortalPostSubmitOutcome(examplePaymentId, false),
+    null,
+    'the current payment should keep waiting for DIBS verification'
+);
+assert.equal(
+    api.getPortalPostSubmitOutcome(examplePaymentId, true),
+    'verified',
+    'a verified refund should advance the queue'
+);
+scenario.location.pathname = '/portal-frontend/payments';
+assert.equal(
+    api.getPortalPostSubmitOutcome(examplePaymentId, false),
+    'navigated',
+    'a DIBS SPA return to the payments list must reopen the submitted item'
+);
+scenario.location.pathname = '/administration';
 
 const queueNow = Date.now();
 const validQueue = {
