@@ -18,7 +18,7 @@ const isolatedSource = `${scriptSource.slice(0, startupIndex)}
         handleRemoveSpacesClick,
         injectStyles,
         getPaymentIdFromHref,
-        getRefundConfirmationPhrase,
+        isPortalRefundActionLabel,
         isPaymentHistoryPage,
         isRefundableStatus,
         isRefundedStatus,
@@ -448,7 +448,12 @@ assert.equal(api.isRefundableStatus('Paid'), true);
 assert.equal(api.isRefundableStatus('Refundert'), false);
 assert.equal(api.isRefundedStatus('Refundert'), true);
 assert.equal(api.isRefundedStatus('refunded'), true);
-assert.equal(api.getRefundConfirmationPhrase(4), 'REFUNDER 4');
+assert.equal(api.isPortalRefundActionLabel('Refunder'), true);
+assert.equal(api.isPortalRefundActionLabel('Refund'), true);
+assert.equal(api.isPortalRefundActionLabel('Refunder 95,00 NOK'), true);
+assert.equal(api.isPortalRefundActionLabel('Refund 95.00 NOK'), true);
+assert.equal(api.isPortalRefundActionLabel('Refundert'), false);
+assert.equal(api.isPortalRefundActionLabel('Refund history'), false);
 
 const examplePaymentId = 'a'.repeat(32);
 assert.equal(

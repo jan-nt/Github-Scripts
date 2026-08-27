@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      2.0.0
+// @version      2.0.1
 // @description  Adds safe admin search links and an explicitly armed batch-refund workflow
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -59,9 +59,6 @@
     const openBrowserWindow = typeof window.open === 'function'
         ? window.open.bind(window)
         : null;
-    const requestUserConfirmation = typeof window.prompt === 'function'
-        ? window.prompt.bind(window)
-        : null;
 
     const PAYMANAGER_BASE_URL =
         'https://paymanager.logos.dk/transactions?chainid=';
@@ -114,10 +111,6 @@
 
     function isRefundedStatus(value) {
         return REFUNDED_STATUSES.has(normalizeLabel(value));
-    }
-
-    function getRefundConfirmationPhrase(count) {
-        return `REFUNDER ${count}`;
     }
 
     function getPaymentIdFromHref(href) {
@@ -1169,20 +1162,6 @@
                 paymentIds.push(paymentId);
             }
 
-            const phrase = getRefundConfirmationPhrase(paymentIds.length);
-            const answer = requestUserConfirmation?.(
-                `Safety check\n\n${paymentIds.length} payment(s) will be fully refunded one at a time. ` +
-                'The batch stops on login, an error, or an uncertain result.\n\n' +
-                `Type ${phrase} to arm the batch.`,
-                ''
-            );
-
-            if (answer !== phrase) {
-                portalWindow.close();
-                setRefundStatus('Refund batch cancelled. Nothing was refunded.');
-                return;
-            }
-
             refundQueueForPortal = {
                 version: REFUND_QUEUE_VERSION,
                 token: createRefundToken(),
@@ -1587,32 +1566,42 @@
         });
     }
 
+    function isPortalRefundActionLabel(value) {
+        return /^(?:refunder|refund)(?:\s+[+-]?\d[\d\s.,]*\s+[a-z]{3})?$/.test(
+            normalizeLabel(value)
+        );
+    }
+
     function findPortalRefundButton() {
         return Array.from(document.querySelectorAll('main button')).find(
             button => (
                 !button.disabled &&
-                ['refunder', 'refund'].includes(normalizeLabel(button.textContent))
+                isPortalRefundActionLabel(button.textContent)
             )
         ) || null;
     }
 
     function findPortalRefundDialog() {
-        return Array.from(document.querySelectorAll('[role="dialog"]')).find(
+        return Array.from(document.querySelectorAll(
+            '[role="dialog"], [aria-modal="true"], [data-slot="dialog-content"]'
+        )).find(
             dialog => Array.from(dialog.querySelectorAll('button')).some(
-                button => (
-                    ['refunder', 'refund'].includes(
-                        normalizeLabel(button.textContent)
-                    )
-                )
+                button => isPortalRefundActionLabel(button.textContent)
             )
         ) || null;
     }
 
     function findPortalConfirmRefundButton(dialog) {
-        return Array.from(dialog?.querySelectorAll('button') || [])
+        const buttons = dialog
+            ? Array.from(dialog.querySelectorAll('button'))
+            : Array.from(document.querySelectorAll('body button')).filter(
+                button => !button.closest('main')
+            );
+
+        return buttons
             .filter(button => (
                 !button.disabled &&
-                ['refunder', 'refund'].includes(normalizeLabel(button.textContent))
+                isPortalRefundActionLabel(button.textContent)
             ))
             .at(-1) || null;
     }
@@ -1759,23 +1748,28 @@
         );
         refundButton.click();
 
-        const dialog = await waitForCondition(
-            findPortalRefundDialog,
-            5000,
+        const confirmation = await waitForCondition(
+            () => {
+                const dialog = findPortalRefundDialog();
+                const button = findPortalConfirmRefundButton(dialog) ||
+                    findPortalConfirmRefundButton(null);
+
+                return button ? { dialog, button } : null;
+            },
+            7500,
             100
         );
-        const confirmButton = findPortalConfirmRefundButton(dialog);
 
         if (portalCancelled) return;
 
-        if (!dialog || !confirmButton) {
+        if (!confirmation) {
             stopPortalBatch(
                 'The DIBS refund confirmation dialog did not appear as expected.'
             );
             return;
         }
 
-        confirmButton.click();
+        confirmation.button.click();
 
         const verified = await waitForCondition(
             portalRefundIsVerified,
