@@ -17,6 +17,12 @@ const isolatedSource = `${scriptSource.slice(0, startupIndex)}
         findAdministrationSearchInput,
         handleRemoveSpacesClick,
         injectStyles,
+        getPaymentIdFromHref,
+        getRefundConfirmationPhrase,
+        isPaymentHistoryPage,
+        isRefundableStatus,
+        isRefundedStatus,
+        isValidRefundQueue,
         linkifyElement,
         normalizeSearchValue,
         removeSearchButton,
@@ -381,8 +387,14 @@ function createScenario() {
         Set,
         document,
         encodeURIComponent,
-        location: { pathname: '/administration' },
+        location: {
+            hostname: 'betaling.passpay.no',
+            pathname: '/administration',
+            search: ''
+        },
         requestAnimationFrame: callback => callback(),
+        URL,
+        URLSearchParams,
         window
     });
 
@@ -416,6 +428,71 @@ const formattedPlate = ['AB', '12345'].join(' ');
 assert.equal(api.normalizeSearchValue(formattedPhone), '12345678');
 assert.equal(api.normalizeSearchValue(formattedPlate), 'AB12345');
 assert.equal(api.normalizeSearchValue('keep - value'), 'keep - value');
+
+scenario.location.pathname = '/administration/42';
+scenario.location.search = '?tab=3&nestedTab=1';
+assert.equal(api.isPaymentHistoryPage(), true);
+scenario.location.pathname = '/administration/dynamic-user-id/';
+scenario.location.search = '?nestedTab=1&extra=kept&tab=3';
+assert.equal(api.isPaymentHistoryPage(), true);
+scenario.location.search = '?tab=3&nestedTab=2';
+assert.equal(api.isPaymentHistoryPage(), false);
+scenario.location.pathname = '/administration';
+scenario.location.search = '?tab=3&nestedTab=1';
+assert.equal(api.isPaymentHistoryPage(), false);
+scenario.location.pathname = '/administration';
+scenario.location.search = '';
+
+assert.equal(api.isRefundableStatus(' Betalt '), true);
+assert.equal(api.isRefundableStatus('Paid'), true);
+assert.equal(api.isRefundableStatus('Refundert'), false);
+assert.equal(api.isRefundedStatus('Refundert'), true);
+assert.equal(api.isRefundedStatus('refunded'), true);
+assert.equal(api.getRefundConfirmationPhrase(4), 'REFUNDER 4');
+
+const examplePaymentId = 'a'.repeat(32);
+assert.equal(
+    api.getPaymentIdFromHref(
+        `https://portal.dibspayment.eu/portal-frontend/payments?` +
+        `searchKey=PAYMENT_ID&searchValue=${examplePaymentId}`
+    ),
+    examplePaymentId
+);
+assert.equal(
+    api.getPaymentIdFromHref(
+        `https://portal.dibspayment.eu/portal-frontend/payments/${examplePaymentId}`
+    ),
+    examplePaymentId
+);
+assert.equal(api.getPaymentIdFromHref('https://example.com/not-a-payment'), null);
+
+const queueNow = Date.now();
+const validQueue = {
+    version: 1,
+    token: 'b'.repeat(32),
+    createdAt: queueNow,
+    index: 0,
+    items: [{ paymentId: examplePaymentId, state: 'pending' }]
+};
+assert.equal(api.isValidRefundQueue(validQueue, queueNow), true);
+assert.equal(
+    api.isValidRefundQueue(
+        { ...validQueue, createdAt: queueNow - (31 * 60 * 1000) },
+        queueNow
+    ),
+    false
+);
+assert.equal(
+    api.isValidRefundQueue({ ...validQueue, index: 2 }, queueNow),
+    false
+);
+assert.equal(
+    api.isValidRefundQueue({
+        ...validQueue,
+        items: [{ paymentId: 'invalid', state: 'pending' }]
+    }, queueNow),
+    false
+);
 
 assert.equal(api.findAdministrationSearchInput(), null);
 

@@ -28,7 +28,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 | General Background Session Keeper | 3.2.1 | DIBS and Riverty | Refreshes authenticated pages and safely retries an existing login control when a login page is detected. |
 | General Custom Icons | 2.5.0 | PassPay and PayManager | Applies route-specific tab titles and favicons. |
 | PassPay Search Admin Panel | 7.6.1 | PassPay parking search | Summarizes parking data and hands an Area Manager and license plate to PayManager. |
-| PassPay UserAdmin | 1.9.2 | PassPay administration | Adds safe Chain ID and Payment ID links and a focused admin search action. |
+| PassPay UserAdmin | 2.0.0 | PassPay administration and DIBS | Adds safe Chain ID and Payment ID links, admin search helpers, and an explicitly armed batch-refund workflow. |
 | PayManager Column Controller | 1.2.1 | PayManager transactions | Automatically enforces the configured transaction-column visibility. |
 | PayManager Image Row Highlighter | 1.7.1 | PayManager transactions | Highlights rows that contain event-camera images. |
 | PayManager Parking User Selector | 2.9.4 | PayManager parking | Restores the selected PRS user and performs opt-in, guarded Active/Pending plate searches. |
@@ -42,6 +42,8 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 - Area Manager and license-plate handoffs use a URL fragment. Fragments are not included in HTTP requests. The receiving script keeps a session-only recovery copy for at most five minutes and removes both the copy and fragment after use or expiry. Page scripts and browser extensions can still read a fragment while it is present.
 - The editable PayManager parking license-plate field is blank during normal browsing and is not persisted. An explicit PassPay handoff can retain its recovery copy in session storage for at most five minutes, as described above.
 - Chain IDs and payment IDs opened in another portal are placed in that portal's query string and can appear in browser history and service logs.
+- PassPay UserAdmin keeps a refund batch in memory while collecting Payment IDs, then transfers it only to the specifically opened DIBS tab. That tab stores the guarded queue in session storage for at most 30 minutes so login redirects and page reloads can resume safely. The queue is removed on completion, cancellation, expiry, or any uncertain result.
+- The refund workflow never stores, logs, or fills a password. During an armed batch it can prefill `jas@nortronic.com` on the DIBS login page and focuses the password field for manual entry.
 - Only the identifier for the last selected PayManager parking user is stored in PayManager's local browser storage. The display label is derived from the page instead of being persisted. The script treats the identifier as expired after 30 days and removes it the next time it checks the stored value.
 - PassPay Search Admin Panel loads the version-pinned html2canvas 1.4.1 file from jsDelivr for local screenshot creation and verifies it with a SHA-256 integrity hash.
 - Copy and screenshot actions intentionally place displayed customer data on the clipboard or in the browser's download folder. Handle those outputs according to company policy.
@@ -50,6 +52,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 ## Known limitations
 
 - Several workflows depend on the sites' current URLs, labels, and DOM structure. Site updates can require corresponding userscript updates.
+- Batch refunds require the PassPay payment-history detail dialog and the DIBS refund/status controls to retain recognizable labels. The workflow stops without retrying if a Payment ID, confirmation dialog, final `Refundert` status, or refund-user email cannot be verified.
 - Chrome may throttle timers in background tabs, so the five-minute session-keeper check can run later than scheduled.
 - The login recovery feature clicks an existing login button; it cannot supply credentials, complete MFA, or recover from an expired identity-provider session.
 - There are no automated browser integration tests because the target pages require authorized accounts.
@@ -74,6 +77,13 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-08-27 guarded PassPay batch refunds
+
+- PassPay UserAdmin 2.0.0 adds an off-by-default refund-selection mode only on dynamic `/administration/{userId}?tab=3&nestedTab=1` payment-history pages.
+- Added current-page multi-selection for paid entries, bounded Payment ID collection through each existing detail dialog, duplicate-ID rejection, a maximum batch size, and an exact typed confirmation before opening DIBS.
+- Added one-at-a-time DIBS processing with already-refunded detection, session-only 30-minute recovery, manual-login pause, visible progress/cancellation, and strict final verification of both `Refundert` and `jas@nortronic.com` before continuing.
+- A submitted-but-unverified refund is never retried automatically; the remaining batch stops for manual review.
 
 ### 2026-08-25 favicon and UserAdmin fixes
 
