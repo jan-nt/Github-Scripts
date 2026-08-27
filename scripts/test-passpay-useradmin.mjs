@@ -14,6 +14,7 @@ const isolatedSource = `${scriptSource.slice(0, startupIndex)}
     window.__passPayUserAdminTest = {
         addRemoveSpacesButton,
         addSmartSpaceRemoval,
+        canRefreshPortalVerification,
         findAdministrationSearchInput,
         handleRemoveSpacesClick,
         injectStyles,
@@ -492,6 +493,28 @@ assert.equal(
 );
 scenario.location.pathname = '/administration';
 
+assert.equal(
+    api.canRefreshPortalVerification({ state: 'submitted' }),
+    true,
+    'an older submitted queue item may use the single verification refresh'
+);
+assert.equal(
+    api.canRefreshPortalVerification({
+        state: 'submitted',
+        verificationRefreshes: 0
+    }),
+    true,
+    'a new submitted queue item may use the single verification refresh'
+);
+assert.equal(
+    api.canRefreshPortalVerification({
+        state: 'submitted',
+        verificationRefreshes: 1
+    }),
+    false,
+    'a submitted queue item must not enter a refresh loop'
+);
+
 const queueNow = Date.now();
 const validQueue = {
     version: 1,
@@ -501,6 +524,22 @@ const validQueue = {
     items: [{ paymentId: examplePaymentId, state: 'pending' }]
 };
 assert.equal(api.isValidRefundQueue(validQueue, queueNow), true);
+assert.equal(api.isValidRefundQueue({
+    ...validQueue,
+    items: [{
+        paymentId: examplePaymentId,
+        state: 'submitted',
+        verificationRefreshes: 1
+    }]
+}, queueNow), true);
+assert.equal(api.isValidRefundQueue({
+    ...validQueue,
+    items: [{
+        paymentId: examplePaymentId,
+        state: 'submitted',
+        verificationRefreshes: 2
+    }]
+}, queueNow), false);
 assert.equal(
     api.isValidRefundQueue(
         { ...validQueue, createdAt: queueNow - (31 * 60 * 1000) },
