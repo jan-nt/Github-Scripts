@@ -28,3 +28,6 @@ Thumbs.db
 # Editor metadata
 .idea/
 .vscode/
+
+# Local linked worktrees
+/Github-Scripts-batch-continuation/
