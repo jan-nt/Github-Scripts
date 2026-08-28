@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.10.0
+// @version      2.10.1
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -49,9 +49,9 @@
     const HANDOFF_MAX_ATTEMPTS = 180;
     const HANDOFF_AREA_SETTLE_MS = 750;
     const HANDOFF_PENDING_SETTLE_MS = 1500;
-    const HANDOFF_TABLE_READY_FALLBACK_MS = 5000;
-    const HANDOFF_FILTER_RESULT_TIMEOUT_MS = 5000;
-    const HANDOFF_PLATE_REAPPLY_MS = 1000;
+    const HANDOFF_TABLE_READY_FALLBACK_MS = 3000;
+    const HANDOFF_FILTER_RESULT_TIMEOUT_MS = 3000;
+    const HANDOFF_PLATE_REAPPLY_MS = 500;
     const HANDOFF_MAX_PLATE_DISPATCHES = 3;
     const HANDOFF_STABLE_RESULT_CHECKS = 2;
     const MANUAL_PLATE_STORAGE_KEY = 'pm_parking_manual_plate_v1';
@@ -1350,18 +1350,21 @@
             const renderedMatch = hasRenderedPlateMatch(
                 handoff.licensePlate
             );
-
-            if (
+            const matchingResultObserved =
                 filterDrawObserved &&
                 renderedMatch &&
                 isEntriesSummaryText(entriesText) &&
-                !isEmptyEntriesText(entriesText) &&
+                !isEmptyEntriesText(entriesText);
+
+            if (
+                matchingResultObserved &&
                 stableResultChecks >= HANDOFF_STABLE_RESULT_CHECKS
             ) {
                 return finishMatchedResult(handoff, input);
             }
 
             if (
+                !matchingResultObserved &&
                 plateDispatchCount < HANDOFF_MAX_PLATE_DISPATCHES &&
                 now - lastPlateDispatchAt >= HANDOFF_PLATE_REAPPLY_MS
             ) {

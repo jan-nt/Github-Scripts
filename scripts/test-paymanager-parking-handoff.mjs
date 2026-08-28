@@ -55,6 +55,7 @@ function createHandoffScenario({
     pendingApplyAfterDispatches = 1,
     activeFilteredRowMode = 'match',
     pendingFilteredRowMode = 'match',
+    plateReapplyMs = null,
     locationHash = '#tmAreaManager=Example%20Manager&tmLicensePlate=TEST123'
 } = {}) {
     let clock = 0;
@@ -427,7 +428,14 @@ function createHandoffScenario({
         }
     };
 
-    vm.runInNewContext(testSource, context);
+    const scenarioSource = plateReapplyMs === null
+        ? testSource
+        : testSource.replace(
+            /const HANDOFF_PLATE_REAPPLY_MS = \d+;/,
+            `const HANDOFF_PLATE_REAPPLY_MS = ${plateReapplyMs};`
+        );
+
+    vm.runInNewContext(scenarioSource, context);
 
     function runTimers(maximumCallbacks = 240) {
         let callbacks = 0;
@@ -587,9 +595,11 @@ assert.deepEqual(
     'legacy literal exact, prefix, and contains ranking must remain intact'
 );
 
-// A positive Active result must stop the flow without touching Pending.
+// A positive Active result must stop without a redundant dispatch, even when
+// the plate reapply interval matches the handoff retry interval.
 const activeMatch = createHandoffScenario({
-    activeApplyAfterDispatches: 2
+    activeApplyAfterDispatches: 2,
+    plateReapplyMs: 500
 });
 
 assert.equal(activeMatch.runScriptAgain(), true);
@@ -607,7 +617,7 @@ assert.deepEqual(activeMatch.select.dispatchedEvents, []);
 assert.equal(activeMatch.getCleanUrl(), '/parking');
 assert.equal(activeMatch.status.textContent, 'Found in Active: TEST123');
 
-// A stable zero Active result waits five seconds, then searches Pending.
+// A stable zero Active result waits three seconds, then searches Pending.
 const pendingMatch = createHandoffScenario({
     activeFilteredText: '0 0 69'
 });
@@ -634,7 +644,7 @@ assert.equal(pendingFirst.getActiveClicks(), 1);
 assert.equal(pendingFirst.getPendingClicks(), 0);
 assert.equal(pendingFirst.status.textContent, 'Found in Active: TEST123');
 
-// A table with no rows uses the five-second readiness fallback before Pending.
+// A table with no rows uses the three-second readiness fallback before Pending.
 const emptyBoth = createHandoffScenario({
     activeInitialText: '0 0 0',
     activeFilteredText: '0 0 0',
@@ -650,7 +660,8 @@ const pendingClick = emptyBoth.getStatusClickTimes().find(
 );
 
 assert.ok(pendingClick, 'Expected the Pending status fallback');
-assert.ok(pendingClick.at >= 5000, 'Pending was selected before the table fallback');
+assert.ok(pendingClick.at >= 3000, 'Pending was selected before the table fallback');
+assert.ok(pendingClick.at < 5000, 'Pending did not use the faster table fallback');
 assert.equal(emptyBoth.getActivePlateDispatches(), 0);
 assert.equal(emptyBoth.getPendingPlateDispatches(), 0);
 assert.equal(
@@ -671,6 +682,10 @@ assert.equal(ignoredFilter.getPendingClicks(), 0);
 assert.equal(
     ignoredFilter.status.textContent,
     'PayManager did not apply the plate filter for: TEST123'
+);
+assert.ok(
+    ignoredFilter.getClock() < 6000,
+    'Ignored plate filters must stop within the faster result timeout'
 );
 
 // A positive summary is not a match unless a rendered row contains the plate.
