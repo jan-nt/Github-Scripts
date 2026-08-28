@@ -25,6 +25,9 @@ const testSource = `${source.slice(0, initIndex)}
         isValidPlate,
         isEmptyEntriesText,
         isEntriesSummaryText,
+        findPrsSearchMatches: typeof findPrsSearchMatches === 'function'
+            ? findPrsSearchMatches
+            : undefined,
         startInitialHandoffOrRestore,
         markTableReloadExpected,
         hasTableChangedSince
@@ -506,6 +509,54 @@ function createHandoffScenario({
         runTimers
     };
 }
+
+const searchScenario = createHandoffScenario({ locationHash: '' });
+
+assert.equal(
+    typeof searchScenario.api.findPrsSearchMatches,
+    'function',
+    'PRS search must expose its production matching behavior'
+);
+
+const prsSearchOptions = [
+    { value: 'manager-1', label: 'Helse Fonna AS' },
+    { value: 'manager-2', label: 'Nesbyen-Hedalen' },
+    { value: 'manager-3', label: 'HelseFonnaAS' },
+    { value: 'manager-4', label: 'Helse Vest AS' }
+];
+
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'HelseFonnaAS'
+    ).map(option => option.label).includes('Helse Fonna AS'),
+    true,
+    'typing a joined name must find the spaced PRS label'
+);
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'Nesbyen Hedalen'
+    ).map(option => option.label).join('|'),
+    'Nesbyen-Hedalen',
+    'spaces and hyphens must be interchangeable in PRS search'
+);
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'HelseFonnaAS'
+    )[0].label,
+    'HelseFonnaAS',
+    'a literal exact label must outrank a separator-insensitive match'
+);
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'HelseFonnaAZ'
+    ).length,
+    0,
+    'separator matching must not become broad typo matching'
+);
 
 // A positive Active result must stop the flow without touching Pending.
 const activeMatch = createHandoffScenario({
