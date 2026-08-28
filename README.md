@@ -31,7 +31,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 | PassPay UserAdmin | 2.0.3 | PassPay administration and DIBS | Adds safe Chain ID and Payment ID links, admin search helpers, and an explicitly armed batch-refund workflow. |
 | PayManager Column Controller | 1.2.1 | PayManager transactions | Automatically enforces the configured transaction-column visibility. |
 | PayManager Image Row Highlighter | 1.7.1 | PayManager transactions | Highlights rows that contain event-camera images. |
-| PayManager Parking User Selector | 2.10.0 | PayManager parking | Restores the selected PRS user, provides separator-insensitive PRS search, and performs opt-in, guarded Active/Pending plate searches. |
+| PayManager Parking User Selector | 2.10.1 | PayManager parking | Restores the selected PRS user, provides separator-insensitive PRS search, and performs opt-in, guarded Active/Pending plate searches. |
 | PayManager Search Input Normalizer | 1.0.1 | PayManager transactions and parking | Removes spaces and dashes from typed filter text. |
 
 ## Privacy and security
@@ -77,6 +77,11 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-08-28 PayManager parking search timing
+
+- PayManager Parking User Selector 2.10.1 reduces the bounded table-readiness and filter-result waits from five seconds to three seconds and reapplies a handed-off license plate after 500 milliseconds when the page has not yet accepted it.
+- Once a matching filtered result is visible, the script now waits for the required stable observation without sending a redundant third search-input event.
 
 ### 2026-08-28 separator-insensitive PRS user search
 
