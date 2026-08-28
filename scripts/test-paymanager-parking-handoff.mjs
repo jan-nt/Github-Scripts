@@ -25,6 +25,9 @@ const testSource = `${source.slice(0, initIndex)}
         isValidPlate,
         isEmptyEntriesText,
         isEntriesSummaryText,
+        findPrsSearchMatches: typeof findPrsSearchMatches === 'function'
+            ? findPrsSearchMatches
+            : undefined,
         startInitialHandoffOrRestore,
         markTableReloadExpected,
         hasTableChangedSince
@@ -506,6 +509,83 @@ function createHandoffScenario({
         runTimers
     };
 }
+
+const searchScenario = createHandoffScenario({ locationHash: '' });
+
+assert.equal(
+    typeof searchScenario.api.findPrsSearchMatches,
+    'function',
+    'PRS search must expose its production matching behavior'
+);
+
+const prsSearchOptions = [
+    { value: 'manager-1', label: 'Helse Fonna AS' },
+    { value: 'manager-2', label: 'Nesbyen-Hedalen' },
+    { value: 'manager-3', label: 'HelseFonnaAS' },
+    { value: 'manager-4', label: 'Helse Vest AS' }
+];
+
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'HelseFonnaAS'
+    ).map(option => option.label).includes('Helse Fonna AS'),
+    true,
+    'typing a joined name must find the spaced PRS label'
+);
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'Nesbyen Hedalen'
+    ).map(option => option.label).join('|'),
+    'Nesbyen-Hedalen',
+    'spaces and hyphens must be interchangeable in PRS search'
+);
+
+for (const [label, query, separatorName] of [
+    ['Fjord_Kraft_AS', 'Fjord Kraft AS', 'underscores'],
+    ['Oslo.Parkering.AS', 'Oslo Parkering AS', 'periods'],
+    ['Nord/Vest Drift', 'Nord Vest Drift', 'slashes']
+]) {
+    assert.deepEqual(
+        searchScenario.api.findPrsSearchMatches(
+            [{ value: separatorName, label }],
+            query
+        ).map(option => option.label),
+        [label],
+        `${separatorName} must be interchangeable with spaces in PRS search`
+    );
+}
+
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'HelseFonnaAS'
+    )[0].label,
+    'HelseFonnaAS',
+    'a literal exact label must outrank a separator-insensitive match'
+);
+assert.equal(
+    searchScenario.api.findPrsSearchMatches(
+        prsSearchOptions,
+        'HelseFonnaAZ'
+    ).length,
+    0,
+    'separator matching must not become broad typo matching'
+);
+
+assert.deepEqual(
+    searchScenario.api.findPrsSearchMatches(
+        [
+            { value: 'literal-exact', label: 'Alpha' },
+            { value: 'literal-prefix', label: 'Alpha Beta' },
+            { value: 'literal-contains', label: 'Beta Alpha' }
+        ],
+        'Alpha'
+    ).map(option => option.label),
+    ['Alpha', 'Alpha Beta', 'Beta Alpha'],
+    'legacy literal exact, prefix, and contains ranking must remain intact'
+);
 
 // A positive Active result must stop the flow without touching Pending.
 const activeMatch = createHandoffScenario({
