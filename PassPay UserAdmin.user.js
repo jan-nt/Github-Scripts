@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PassPay UserAdmin
 // @namespace    https://nidushan.com
-// @version      2.0.1
+// @version      2.0.3
 // @description  Adds safe admin search links and an explicitly armed batch-refund workflow
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -53,6 +53,7 @@
     const REFUND_QUEUE_TTL_MS = 30 * 60 * 1000;
     const PAYMENT_ID_PATTERN = /^[a-f0-9]{32}$/i;
     const MAX_REFUND_BATCH_SIZE = 30;
+    const MAX_PORTAL_VERIFICATION_REFRESHES = 1;
     const PORTAL_READY_MESSAGE = 'pp-useradmin-refund-portal-ready';
     const PORTAL_QUEUE_MESSAGE = 'pp-useradmin-refund-queue';
     const REFUND_WINDOW_NAME_PREFIX = 'ppUserAdminRefundPortal-';
@@ -151,11 +152,19 @@
             return false;
         }
 
-        return queue.items.every(item => (
-            item &&
-            PAYMENT_ID_PATTERN.test(item.paymentId) &&
-            ['pending', 'submitted', 'refunded', 'skipped'].includes(item.state)
-        ));
+        return queue.items.every(item => {
+            const verificationRefreshes =
+                item?.verificationRefreshes ?? 0;
+
+            return (
+                item &&
+                PAYMENT_ID_PATTERN.test(item.paymentId) &&
+                ['pending', 'submitted', 'refunded', 'skipped'].includes(item.state) &&
+                Number.isInteger(verificationRefreshes) &&
+                verificationRefreshes >= 0 &&
+                verificationRefreshes <= MAX_PORTAL_VERIFICATION_REFRESHES
+            );
+        });
     }
 
     function injectStyles() {
@@ -1169,7 +1178,8 @@
                 index: 0,
                 items: paymentIds.map(paymentId => ({
                     paymentId,
-                    state: 'pending'
+                    state: 'pending',
+                    verificationRefreshes: 0
                 }))
             };
             refundPortalWindow = portalWindow;
@@ -1606,6 +1616,53 @@
             .at(-1) || null;
     }
 
+    function getPortalPostSubmitOutcome(
+        expectedPaymentId,
+        verified = portalRefundIsVerified()
+    ) {
+        if (verified) return 'verified';
+
+        return getCurrentDibsPaymentId() === expectedPaymentId
+            ? null
+            : 'navigated';
+    }
+
+    function getPortalVerificationRefreshCount(item) {
+        return Number.isInteger(item?.verificationRefreshes) &&
+            item.verificationRefreshes >= 0
+            ? item.verificationRefreshes
+            : 0;
+    }
+
+    function canRefreshPortalVerification(item) {
+        return getPortalVerificationRefreshCount(item) <
+            MAX_PORTAL_VERIFICATION_REFRESHES;
+    }
+
+    function tryRefreshPortalForVerification(queue) {
+        const item = queue.items[queue.index];
+
+        if (!item || !canRefreshPortalVerification(item)) {
+            return 'exhausted';
+        }
+
+        item.verificationRefreshes =
+            getPortalVerificationRefreshCount(item) + 1;
+
+        if (!savePortalRefundQueue(queue)) {
+            return 'save-failed';
+        }
+
+        renderPortalStatus(
+            `Refund ${queue.index + 1} was submitted, but DIBS has not ` +
+            'updated the page. Refreshing once for final verification...',
+            { showCancel: true }
+        );
+        portalProcessing = false;
+        location.reload();
+        return 'reloading';
+    }
+
     function navigateToPortalQueueItem(queue) {
         if (portalCancelled) return;
 
@@ -1695,7 +1752,7 @@
         if (item.state === 'submitted') {
             const verified = await waitForCondition(
                 portalRefundIsVerified,
-                20000,
+                45000,
                 250
             );
 
@@ -1704,9 +1761,16 @@
             if (verified) {
                 completePortalQueueItem(queue, 'refunded');
             } else {
+                const refreshOutcome = tryRefreshPortalForVerification(queue);
+
+                if (refreshOutcome === 'reloading') return;
+
                 stopPortalBatch(
                     'A refund may have been submitted, but its final status and ' +
-                    `${DIBS_LOGIN_EMAIL} confirmation could not be verified.`
+                    `${DIBS_LOGIN_EMAIL} confirmation could not be verified` +
+                    (refreshOutcome === 'save-failed'
+                        ? ' because the refresh safeguard could not be saved.'
+                        : ' after one final verification refresh.')
                 );
             }
             return;
@@ -1771,18 +1835,36 @@
 
         confirmation.button.click();
 
-        const verified = await waitForCondition(
-            portalRefundIsVerified,
+        const postSubmitOutcome = await waitForCondition(
+            () => getPortalPostSubmitOutcome(item.paymentId),
             45000,
             250
         );
 
         if (portalCancelled) return;
 
-        if (!verified) {
+        if (postSubmitOutcome === 'navigated') {
+            renderPortalStatus(
+                `Refund ${queue.index + 1} was submitted. ` +
+                'Reopening it for verification before continuing...',
+                { showCancel: true }
+            );
+            portalProcessing = false;
+            navigateToPortalQueueItem(queue);
+            return;
+        }
+
+        if (postSubmitOutcome !== 'verified') {
+            const refreshOutcome = tryRefreshPortalForVerification(queue);
+
+            if (refreshOutcome === 'reloading') return;
+
             stopPortalBatch(
                 'DIBS did not confirm both Refundert status and the expected ' +
-                `${DIBS_LOGIN_EMAIL} refund event within 45 seconds.`
+                `${DIBS_LOGIN_EMAIL} refund event` +
+                (refreshOutcome === 'save-failed'
+                    ? ' because the refresh safeguard could not be saved.'
+                    : ' after one final verification refresh.')
             );
             return;
         }

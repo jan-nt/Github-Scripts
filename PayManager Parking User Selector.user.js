@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.9.4
+// @version      2.10.0
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -116,6 +116,13 @@
             .replace(/[\u0300-\u036f]/g, '');
     }
 
+    function compactPrsSearchKey(text) {
+        return normalize(text).replace(
+            /[\s\u00A0\u2007\u202F._/\\\-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+/g,
+            ''
+        );
+    }
+
     function normalizePlate(value) {
         return String(value || '')
             .trim()
@@ -152,6 +159,71 @@
             value: option.value,
             label: option.textContent.trim()
         }));
+    }
+
+    function findPrsSearchMatches(options, rawQuery) {
+        const query = normalize(String(rawQuery || '').trim());
+
+        if (!query) return [];
+
+        const compactQuery = compactPrsSearchKey(query);
+
+        return options
+            .map(option => {
+                const label = normalize(option.label);
+                const value = normalize(option.value);
+                const compactLabel = compactPrsSearchKey(label);
+                const compactValue = compactPrsSearchKey(value);
+                let score = 0;
+
+                if (label === query) score += 100;
+                if (label.startsWith(query)) score += 80;
+                if (label.includes(query)) score += 50;
+                if (value === query) score += 90;
+                if (value.startsWith(query)) score += 60;
+                if (value.includes(query)) score += 40;
+
+                if (
+                    compactQuery &&
+                    compactLabel &&
+                    (compactLabel !== label || compactQuery !== query)
+                ) {
+                    if (compactLabel === compactQuery) {
+                        score = Math.max(score, 200);
+                    } else if (compactLabel.startsWith(compactQuery)) {
+                        score = Math.max(score, 120);
+                    } else if (compactLabel.includes(compactQuery)) {
+                        score = Math.max(score, 45);
+                    }
+                }
+
+                if (
+                    compactQuery &&
+                    compactValue &&
+                    (compactValue !== value || compactQuery !== query)
+                ) {
+                    if (compactValue === compactQuery) {
+                        score = Math.max(score, 180);
+                    } else if (compactValue.startsWith(compactQuery)) {
+                        score = Math.max(score, 100);
+                    } else if (compactValue.includes(compactQuery)) {
+                        score = Math.max(score, 35);
+                    }
+                }
+
+                return {
+                    ...option,
+                    score
+                };
+            })
+            .filter(option => option.score > 0)
+            .sort((a, b) => {
+                if (b.score !== a.score) {
+                    return b.score - a.score;
+                }
+
+                return a.label.localeCompare(b.label);
+            });
     }
 
     function getOptionByValue(value) {
@@ -1881,11 +1953,7 @@
         function search() {
             syncClearButton(input, PRS_CLEAR_BUTTON_ID);
 
-            const query = normalize(
-                input.value.trim()
-            );
-
-            if (!query) {
+            if (!input.value.trim()) {
                 resultsBox.style.display =
                     'none';
 
@@ -1896,51 +1964,10 @@
                 return;
             }
 
-            const matches = getOptions()
-                .map(option => {
-                    const label =
-                        normalize(option.label);
-
-                    const value =
-                        normalize(option.value);
-
-                    let score = 0;
-
-                    if (label === query)
-                        score += 100;
-
-                    if (label.startsWith(query))
-                        score += 80;
-
-                    if (label.includes(query))
-                        score += 50;
-
-                    if (value === query)
-                        score += 90;
-
-                    if (value.startsWith(query))
-                        score += 60;
-
-                    if (value.includes(query))
-                        score += 40;
-
-                    return {
-                        ...option,
-                        score
-                    };
-                })
-                .filter(
-                    option => option.score > 0
-                )
-                .sort((a, b) => {
-                    if (b.score !== a.score) {
-                        return b.score - a.score;
-                    }
-
-                    return a.label.localeCompare(
-                        b.label
-                    );
-                });
+            const matches = findPrsSearchMatches(
+                getOptions(),
+                input.value
+            );
 
             renderResults(matches);
         }

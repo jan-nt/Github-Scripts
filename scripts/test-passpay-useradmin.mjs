@@ -14,10 +14,12 @@ const isolatedSource = `${scriptSource.slice(0, startupIndex)}
     window.__passPayUserAdminTest = {
         addRemoveSpacesButton,
         addSmartSpaceRemoval,
+        canRefreshPortalVerification,
         findAdministrationSearchInput,
         handleRemoveSpacesClick,
         injectStyles,
         getPaymentIdFromHref,
+        getPortalPostSubmitOutcome,
         isPortalRefundActionLabel,
         isPaymentHistoryPage,
         isRefundableStatus,
@@ -471,6 +473,48 @@ assert.equal(
 );
 assert.equal(api.getPaymentIdFromHref('https://example.com/not-a-payment'), null);
 
+scenario.location.pathname =
+    `/portal-frontend/payments/${examplePaymentId}`;
+assert.equal(
+    api.getPortalPostSubmitOutcome(examplePaymentId, false),
+    null,
+    'the current payment should keep waiting for DIBS verification'
+);
+assert.equal(
+    api.getPortalPostSubmitOutcome(examplePaymentId, true),
+    'verified',
+    'a verified refund should advance the queue'
+);
+scenario.location.pathname = '/portal-frontend/payments';
+assert.equal(
+    api.getPortalPostSubmitOutcome(examplePaymentId, false),
+    'navigated',
+    'a DIBS SPA return to the payments list must reopen the submitted item'
+);
+scenario.location.pathname = '/administration';
+
+assert.equal(
+    api.canRefreshPortalVerification({ state: 'submitted' }),
+    true,
+    'an older submitted queue item may use the single verification refresh'
+);
+assert.equal(
+    api.canRefreshPortalVerification({
+        state: 'submitted',
+        verificationRefreshes: 0
+    }),
+    true,
+    'a new submitted queue item may use the single verification refresh'
+);
+assert.equal(
+    api.canRefreshPortalVerification({
+        state: 'submitted',
+        verificationRefreshes: 1
+    }),
+    false,
+    'a submitted queue item must not enter a refresh loop'
+);
+
 const queueNow = Date.now();
 const validQueue = {
     version: 1,
@@ -480,6 +524,22 @@ const validQueue = {
     items: [{ paymentId: examplePaymentId, state: 'pending' }]
 };
 assert.equal(api.isValidRefundQueue(validQueue, queueNow), true);
+assert.equal(api.isValidRefundQueue({
+    ...validQueue,
+    items: [{
+        paymentId: examplePaymentId,
+        state: 'submitted',
+        verificationRefreshes: 1
+    }]
+}, queueNow), true);
+assert.equal(api.isValidRefundQueue({
+    ...validQueue,
+    items: [{
+        paymentId: examplePaymentId,
+        state: 'submitted',
+        verificationRefreshes: 2
+    }]
+}, queueNow), false);
 assert.equal(
     api.isValidRefundQueue(
         { ...validQueue, createdAt: queueNow - (31 * 60 * 1000) },
