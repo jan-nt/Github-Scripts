@@ -541,6 +541,22 @@ assert.equal(
     'Nesbyen-Hedalen',
     'spaces and hyphens must be interchangeable in PRS search'
 );
+
+for (const [label, query, separatorName] of [
+    ['Fjord_Kraft_AS', 'Fjord Kraft AS', 'underscores'],
+    ['Oslo.Parkering.AS', 'Oslo Parkering AS', 'periods'],
+    ['Nord/Vest Drift', 'Nord Vest Drift', 'slashes']
+]) {
+    assert.deepEqual(
+        searchScenario.api.findPrsSearchMatches(
+            [{ value: separatorName, label }],
+            query
+        ).map(option => option.label),
+        [label],
+        `${separatorName} must be interchangeable with spaces in PRS search`
+    );
+}
+
 assert.equal(
     searchScenario.api.findPrsSearchMatches(
         prsSearchOptions,
@@ -556,6 +572,19 @@ assert.equal(
     ).length,
     0,
     'separator matching must not become broad typo matching'
+);
+
+assert.deepEqual(
+    searchScenario.api.findPrsSearchMatches(
+        [
+            { value: 'literal-exact', label: 'Alpha' },
+            { value: 'literal-prefix', label: 'Alpha Beta' },
+            { value: 'literal-contains', label: 'Beta Alpha' }
+        ],
+        'Alpha'
+    ).map(option => option.label),
+    ['Alpha', 'Alpha Beta', 'Beta Alpha'],
+    'legacy literal exact, prefix, and contains ranking must remain intact'
 );
 
 // A positive Active result must stop the flow without touching Pending.
