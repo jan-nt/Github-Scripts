@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.10.1
+// @version      2.10.2
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -161,61 +161,79 @@
         }));
     }
 
-    function findPrsSearchMatches(options, rawQuery) {
+    function createPrsMatch(option, rawQuery) {
         const query = normalize(String(rawQuery || '').trim());
 
-        if (!query) return [];
+        if (!query) return null;
 
         const compactQuery = compactPrsSearchKey(query);
+        const label = normalize(option.label);
+        const value = normalize(option.value);
+        const compactLabel = compactPrsSearchKey(label);
+        const compactValue = compactPrsSearchKey(value);
+        const reliable = Boolean(
+            query &&
+            (
+                label === query ||
+                value === query ||
+                (
+                    compactQuery &&
+                    (
+                        compactLabel === compactQuery ||
+                        compactValue === compactQuery
+                    )
+                )
+            )
+        );
+        let score = 0;
+
+        if (label === query) score += 100;
+        if (label.startsWith(query)) score += 80;
+        if (label.includes(query)) score += 50;
+        if (value === query) score += 90;
+        if (value.startsWith(query)) score += 60;
+        if (value.includes(query)) score += 40;
+
+        if (
+            compactQuery &&
+            compactLabel &&
+            (compactLabel !== label || compactQuery !== query)
+        ) {
+            if (compactLabel === compactQuery) {
+                score = Math.max(score, 200);
+            } else if (compactLabel.startsWith(compactQuery)) {
+                score = Math.max(score, 120);
+            } else if (compactLabel.includes(compactQuery)) {
+                score = Math.max(score, 45);
+            }
+        }
+
+        if (
+            compactQuery &&
+            compactValue &&
+            (compactValue !== value || compactQuery !== query)
+        ) {
+            if (compactValue === compactQuery) {
+                score = Math.max(score, 180);
+            } else if (compactValue.startsWith(compactQuery)) {
+                score = Math.max(score, 100);
+            } else if (compactValue.includes(compactQuery)) {
+                score = Math.max(score, 35);
+            }
+        }
+
+        return {
+            ...option,
+            score,
+            reliable
+        };
+    }
+
+    function findPrsSearchMatches(options, rawQuery) {
+        if (!normalize(String(rawQuery || '').trim())) return [];
 
         return options
-            .map(option => {
-                const label = normalize(option.label);
-                const value = normalize(option.value);
-                const compactLabel = compactPrsSearchKey(label);
-                const compactValue = compactPrsSearchKey(value);
-                let score = 0;
-
-                if (label === query) score += 100;
-                if (label.startsWith(query)) score += 80;
-                if (label.includes(query)) score += 50;
-                if (value === query) score += 90;
-                if (value.startsWith(query)) score += 60;
-                if (value.includes(query)) score += 40;
-
-                if (
-                    compactQuery &&
-                    compactLabel &&
-                    (compactLabel !== label || compactQuery !== query)
-                ) {
-                    if (compactLabel === compactQuery) {
-                        score = Math.max(score, 200);
-                    } else if (compactLabel.startsWith(compactQuery)) {
-                        score = Math.max(score, 120);
-                    } else if (compactLabel.includes(compactQuery)) {
-                        score = Math.max(score, 45);
-                    }
-                }
-
-                if (
-                    compactQuery &&
-                    compactValue &&
-                    (compactValue !== value || compactQuery !== query)
-                ) {
-                    if (compactValue === compactQuery) {
-                        score = Math.max(score, 180);
-                    } else if (compactValue.startsWith(compactQuery)) {
-                        score = Math.max(score, 100);
-                    } else if (compactValue.includes(compactQuery)) {
-                        score = Math.max(score, 35);
-                    }
-                }
-
-                return {
-                    ...option,
-                    score
-                };
-            })
+            .map(option => createPrsMatch(option, rawQuery))
             .filter(option => option.score > 0)
             .sort((a, b) => {
                 if (b.score !== a.score) {
@@ -224,6 +242,23 @@
 
                 return a.label.localeCompare(b.label);
             });
+    }
+
+    function findReliablePrsMatch(options, rawQuery) {
+        const matches = findPrsSearchMatches(options, rawQuery)
+            .filter(option => option.reliable);
+
+        if (matches.length === 1) {
+            return {
+                status: 'matched',
+                option: matches[0]
+            };
+        }
+
+        return {
+            status: matches.length > 1 ? 'ambiguous' : 'not-found',
+            option: null
+        };
     }
 
     function getOptionByValue(value) {
@@ -325,23 +360,48 @@
         const hasUrlHandoff =
             params.has(AREA_MANAGER_PARAM) ||
             params.has(LICENSE_PLATE_PARAM);
+        const rawAreaManager = String(
+            params.get(AREA_MANAGER_PARAM) || ''
+        ).trim();
+        const rawLicensePlate = String(
+            params.get(LICENSE_PLATE_PARAM) || ''
+        ).trim();
         const urlPlate = normalizePlate(
-            params.get(LICENSE_PLATE_PARAM)
+            rawLicensePlate
         );
+        let validationError = '';
+
+        if (hasUrlHandoff) {
+            if (!rawAreaManager) {
+                validationError =
+                    'PayManager handoff is missing the Area Manager.';
+            } else if (
+                rawAreaManager.length > 200 ||
+                !compactPrsSearchKey(rawAreaManager) ||
+                /[\u0000-\u001F\u007F]/.test(rawAreaManager)
+            ) {
+                validationError =
+                    'PayManager handoff has an invalid Area Manager.';
+            } else if (!rawLicensePlate) {
+                validationError =
+                    'PayManager handoff is missing the license plate.';
+            } else if (!isValidPlate(urlPlate)) {
+                validationError =
+                    'PayManager handoff has an invalid license plate.';
+            }
+        }
+
         const fromUrl = {
-            areaManager: String(params.get(AREA_MANAGER_PARAM) || '').trim(),
+            areaManager: rawAreaManager,
             licensePlate: isValidPlate(urlPlate) ? urlPlate : '',
-            explicit: hasUrlHandoff
+            explicit: hasUrlHandoff,
+            validationError
         };
 
         if (hasUrlHandoff) {
-            if (!fromUrl.areaManager && !fromUrl.licensePlate) {
+            if (validationError) {
                 clearRequestedHandoff();
-                return {
-                    areaManager: '',
-                    licensePlate: '',
-                    explicit: false
-                };
+                return fromUrl;
             }
 
             savePendingHandoff(fromUrl);
@@ -805,18 +865,8 @@
         input.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
-    function findAreaManagerOption(areaManager) {
-        const exact = getOptionByLabel(areaManager);
-        if (exact) return exact;
-
-        const wanted = normalize(areaManager);
-        const partialMatches = getOptions().filter(option => {
-            const label = normalize(option.label);
-            if (!label) return false;
-            return label.includes(wanted) || wanted.includes(label);
-        });
-
-        return partialMatches.length === 1 ? partialMatches[0] : null;
+    function findAreaManagerMatch(areaManager) {
+        return findReliablePrsMatch(getOptions(), areaManager);
     }
 
     function setStatus(message, color = '#444') {
@@ -1024,6 +1074,11 @@
     function applyRequestedHandoff() {
         const initialHandoff = getEffectiveHandoff();
 
+        if (initialHandoff.validationError) {
+            setStatus(initialHandoff.validationError, 'red');
+            return false;
+        }
+
         if (!initialHandoff.areaManager && !initialHandoff.licensePlate) {
             return false;
         }
@@ -1053,6 +1108,7 @@
         let lastEntriesText = '';
         let stableResultChecks = 0;
         let failureMessage = 'PayManager did not finish the parking search';
+        let terminalAreaManagerFailure = false;
 
         function scheduleNextAttempt() {
             handoffTimer = window.setTimeout(
@@ -1081,14 +1137,24 @@
         function applyAreaManager(handoff) {
             if (areaManagerApplied) return true;
 
-            const option = findAreaManagerOption(handoff.areaManager);
+            const match = findAreaManagerMatch(handoff.areaManager);
             const select = getSelect();
 
-            if (!option || !select) {
+            if (match.status === 'ambiguous') {
                 failureMessage =
-                    `Area Manager not found: ${handoff.areaManager}`;
+                    `Multiple PRS users match: ${handoff.areaManager}. ` +
+                    'Select the user manually.';
+                terminalAreaManagerFailure = true;
                 return false;
             }
+
+            if (match.status !== 'matched' || !select) {
+                failureMessage =
+                    `PRS user not found: ${handoff.areaManager}`;
+                return false;
+            }
+
+            const option = match.option;
 
             if (select.value === option.value) {
                 areaManagerApplied = true;
@@ -1418,6 +1484,12 @@
             if (!handoff.areaManager && !handoff.licensePlate) return;
 
             applyAreaManager(handoff);
+
+            if (terminalAreaManagerFailure) {
+                clearRequestedHandoff();
+                setStatus(failureMessage, 'red');
+                return;
+            }
 
             if (areaManagerApplied && !handoff.licensePlate) {
                 clearRequestedHandoff();
