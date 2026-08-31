@@ -21,6 +21,7 @@ const testSource = `${source.slice(0, startupIndex)}
         hookFetch,
         hookXMLHttpRequest,
         isParkingSearchWorkflowPage,
+        openPayManagerParking,
         processResponse,
         getStoredData,
         scheduleAutoRecoveryReload,
@@ -40,6 +41,7 @@ function createScenario() {
     let reloadCount = 0;
     let nextTimerId = 1;
     let pendingFetchResolve = null;
+    const openedLinks = [];
     const storage = new Map();
     const timers = new Map();
     const location = {
@@ -63,6 +65,22 @@ function createScenario() {
     };
 
     const document = {
+        createElement(tagName) {
+            assert.equal(tagName, 'a');
+
+            return {
+                href: '',
+                target: '',
+                rel: '',
+                click() {
+                    openedLinks.push({
+                        href: this.href,
+                        target: this.target,
+                        rel: this.rel
+                    });
+                }
+            };
+        },
         getElementById(id) {
             return id === 'tm-parking-info' ? panel : null;
         },
@@ -151,6 +169,7 @@ function createScenario() {
         },
         wasPanelRemoved: () => removedPanel,
         getReloadCount: () => reloadCount,
+        getOpenedLinks: () => openedLinks,
         async captureFetchAcrossNavigation(data) {
             context.__adminPanelTest.hookFetch();
             location.href = 'https://betaling.passpay.no/search';
@@ -193,6 +212,33 @@ function createScenario() {
             }
         }
     };
+}
+
+const payManagerLinkScenario = createScenario();
+
+payManagerLinkScenario.api.openPayManagerParking(
+    'NesbyenHedalen',
+    'EF 78-880'
+);
+payManagerLinkScenario.api.openPayManagerParking(
+    'MoskenesKommune',
+    'HRC5I5'
+);
+
+assert.equal(payManagerLinkScenario.getOpenedLinks().length, 2);
+
+for (const [link, expectedAreaManager, expectedPlate] of [
+    [payManagerLinkScenario.getOpenedLinks()[0], 'NesbyenHedalen', 'EF78880'],
+    [payManagerLinkScenario.getOpenedLinks()[1], 'MoskenesKommune', 'HRC5I5']
+]) {
+    const url = new URL(link.href);
+    const params = new URLSearchParams(url.hash.slice(1));
+
+    assert.equal(url.origin + url.pathname, 'https://paymanager.logos.dk/parking');
+    assert.equal(params.get('tmAreaManager'), expectedAreaManager);
+    assert.equal(params.get('tmLicensePlate'), expectedPlate);
+    assert.equal(link.target, '_blank');
+    assert.equal(link.rel, 'noopener noreferrer');
 }
 
 const scenario = createScenario();
