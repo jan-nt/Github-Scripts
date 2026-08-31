@@ -624,7 +624,11 @@ assert.deepEqual(
 
 const reliablePrsOptions = [
     { value: 'moskenes', label: 'Moskenes Kommune' },
-    { value: 'nesbyen', label: 'Nesbyen-Hedalen' }
+    { value: 'nesbyen', label: 'Nesbyen-Hedalen' },
+    { value: 'prs-301', label: 'Vegen Gulsvik-Damtjern SA' },
+    { value: 'prs-302', label: 'Helse Fonna AS' },
+    { value: 'prs-303', label: 'FoglefonnaUser' },
+    { value: 'prs-304', label: 'Flakstad Kommune User' }
 ];
 
 for (const [query, expectedLabel] of [
@@ -633,7 +637,11 @@ for (const [query, expectedLabel] of [
     ['NesbyenHedalen', 'Nesbyen-Hedalen'],
     ['Nesbyen Hedalen', 'Nesbyen-Hedalen'],
     ['Nesbyen-Hedalen', 'Nesbyen-Hedalen'],
-    ['  nEsByEn---hEdAlEn  ', 'Nesbyen-Hedalen']
+    ['  nEsByEn---hEdAlEn  ', 'Nesbyen-Hedalen'],
+    ['VegenGulsvikDamtjern', 'Vegen Gulsvik-Damtjern SA'],
+    ['HelseFonnaHF', 'Helse Fonna AS'],
+    ['Foglefonna', 'FoglefonnaUser'],
+    ['Flakstad', 'Flakstad Kommune User']
 ]) {
     const match = searchScenario.api.findReliablePrsMatch(
         reliablePrsOptions,
@@ -644,6 +652,21 @@ for (const [query, expectedLabel] of [
     assert.equal(match.option.label, expectedLabel);
 }
 
+for (const [query, expectedLabel] of [
+    ['VegenGulsvikDamtjern', 'Vegen Gulsvik-Damtjern SA'],
+    ['HelseFonnaHF', 'Helse Fonna AS'],
+    ['Foglefonna', 'FoglefonnaUser']
+]) {
+    assert.equal(
+        searchScenario.api.findPrsSearchMatches(
+            reliablePrsOptions,
+            query
+        )[0].label,
+        expectedLabel,
+        `${query} must also rank the suffix-aware match first in direct PRS search`
+    );
+}
+
 assert.equal(
     searchScenario.api.findReliablePrsMatch(
         reliablePrsOptions,
@@ -652,6 +675,26 @@ assert.equal(
     'not-found',
     'an unknown compact name must not fall back to fuzzy matching'
 );
+
+assert.equal(
+    searchScenario.api.findReliablePrsMatch(
+        [{ value: 'HelseFonnaHF', label: 'Different Organization AS' }],
+        'HelseFonna'
+    ).status,
+    'not-found',
+    'organization-suffix fallback must not trust a mismatched internal option value'
+);
+
+for (const [query, label] of [['Andre', 'Andreas']]) {
+    assert.equal(
+        searchScenario.api.findReliablePrsMatch(
+            [{ value: 'prs-name-safety', label }],
+            query
+        ).status,
+        'not-found',
+        `${query} must not treat the ending of ${label} as an organization suffix`
+    );
+}
 
 const ambiguousPrsMatch = searchScenario.api.findReliablePrsMatch(
     [
@@ -667,6 +710,36 @@ assert.equal(
     'multiple options with the same compact name must require manual selection'
 );
 assert.equal(ambiguousPrsMatch.option, null);
+
+const ambiguousSuffixPrsMatch = searchScenario.api.findReliablePrsMatch(
+    [
+        { value: 'prs-401', label: 'Helse Fonna AS' },
+        { value: 'prs-402', label: 'Helse Fonna HF' }
+    ],
+    'HelseFonna'
+);
+
+assert.equal(
+    ambiguousSuffixPrsMatch.status,
+    'ambiguous',
+    'multiple options with the same organization stem must require manual selection'
+);
+assert.equal(ambiguousSuffixPrsMatch.option, null);
+
+const exactSuffixPrsMatch = searchScenario.api.findReliablePrsMatch(
+    [
+        { value: 'prs-401', label: 'Helse Fonna AS' },
+        { value: 'prs-402', label: 'Helse Fonna HF' }
+    ],
+    'HelseFonnaHF'
+);
+
+assert.equal(
+    exactSuffixPrsMatch.status,
+    'matched',
+    'an exact compact match must outrank organization-stem fallback matches'
+);
+assert.equal(exactSuffixPrsMatch.option.label, 'Helse Fonna HF');
 
 function verifyUrlHandoff({
     areaManager,
@@ -749,6 +822,27 @@ verifyUrlHandoff({
     encodedLicensePlate: 'EF%2078-880',
     expectedLabel: 'Nesbyen-Hedalen',
     expectedValue: 'nesbyen'
+});
+
+verifyUrlHandoff({
+    areaManager: 'VegenGulsvikDamtjern',
+    licensePlate: 'TEST301',
+    expectedLabel: 'Vegen Gulsvik-Damtjern SA',
+    expectedValue: 'prs-301'
+});
+
+verifyUrlHandoff({
+    areaManager: 'HelseFonnaHF',
+    licensePlate: 'TEST302',
+    expectedLabel: 'Helse Fonna AS',
+    expectedValue: 'prs-302'
+});
+
+verifyUrlHandoff({
+    areaManager: 'Foglefonna',
+    licensePlate: 'TEST123',
+    expectedLabel: 'FoglefonnaUser',
+    expectedValue: 'prs-303'
 });
 
 const missingAreaManager = createHandoffScenario({

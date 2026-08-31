@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.10.2
+// @version      2.10.3
 // @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -123,6 +123,71 @@
         );
     }
 
+    const PRS_OPTIONAL_ORGANIZATION_SUFFIXES = [
+        'PRSUser',
+        'Kommune',
+        'User',
+        'ASA',
+        'IKS',
+        'HF',
+        'KF',
+        'SF',
+        'BA',
+        'AS',
+        'SA'
+    ];
+    const PRS_MIN_ORGANIZATION_STEM_LENGTH = 5;
+    const PRS_SUFFIX_SEPARATOR_PATTERN =
+        '[\\s\\u00A0\\u2007\\u202F._/\\\\\\-\\u2010-\\u2015\\u2212\\uFE58\\uFE63\\uFF0D]+';
+
+    function getPrsOrganizationStem(text) {
+        let remaining = String(text || '')
+            .trim()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+        let suffixRemoved = true;
+        let removedCount = 0;
+
+        while (suffixRemoved) {
+            suffixRemoved = false;
+
+            for (const suffix of PRS_OPTIONAL_ORGANIZATION_SUFFIXES) {
+                const separatedSuffix = new RegExp(
+                    `${PRS_SUFFIX_SEPARATOR_PATTERN}${suffix}$`,
+                    'i'
+                );
+                const separatedMatch = remaining.match(separatedSuffix);
+                let candidate = null;
+
+                if (separatedMatch) {
+                    candidate = remaining.slice(0, separatedMatch.index).trim();
+                } else if (remaining.endsWith(suffix)) {
+                    const prefix = remaining.slice(0, -suffix.length);
+
+                    if (/[a-z0-9]$/.test(prefix)) {
+                        candidate = prefix;
+                    }
+                }
+
+                if (
+                    candidate &&
+                    compactPrsSearchKey(candidate).length >=
+                        PRS_MIN_ORGANIZATION_STEM_LENGTH
+                ) {
+                    remaining = candidate;
+                    suffixRemoved = true;
+                    removedCount += 1;
+                    break;
+                }
+            }
+        }
+
+        return {
+            stem: compactPrsSearchKey(remaining),
+            suffixRemoved: removedCount > 0
+        };
+    }
+
     function normalizePlate(value) {
         return String(value || '')
             .trim()
@@ -171,7 +236,7 @@
         const value = normalize(option.value);
         const compactLabel = compactPrsSearchKey(label);
         const compactValue = compactPrsSearchKey(value);
-        const reliable = Boolean(
+        const exactReliable = Boolean(
             query &&
             (
                 label === query ||
@@ -184,6 +249,13 @@
                     )
                 )
             )
+        );
+        const queryStem = getPrsOrganizationStem(rawQuery);
+        const labelStem = getPrsOrganizationStem(option.label);
+        const suffixReliable = Boolean(
+            queryStem.stem &&
+            labelStem.stem === queryStem.stem &&
+            (queryStem.suffixRemoved || labelStem.suffixRemoved)
         );
         let score = 0;
 
@@ -222,10 +294,15 @@
             }
         }
 
+        if (suffixReliable) {
+            score = Math.max(score, 160);
+        }
+
         return {
             ...option,
             score,
-            reliable
+            exactReliable,
+            suffixReliable
         };
     }
 
@@ -245,18 +322,21 @@
     }
 
     function findReliablePrsMatch(options, rawQuery) {
-        const matches = findPrsSearchMatches(options, rawQuery)
-            .filter(option => option.reliable);
+        const matches = findPrsSearchMatches(options, rawQuery);
+        const exactMatches = matches.filter(option => option.exactReliable);
+        const reliableMatches = exactMatches.length > 0
+            ? exactMatches
+            : matches.filter(option => option.suffixReliable);
 
-        if (matches.length === 1) {
+        if (reliableMatches.length === 1) {
             return {
                 status: 'matched',
-                option: matches[0]
+                option: reliableMatches[0]
             };
         }
 
         return {
-            status: matches.length > 1 ? 'ambiguous' : 'not-found',
+            status: reliableMatches.length > 1 ? 'ambiguous' : 'not-found',
             option: null
         };
     }
