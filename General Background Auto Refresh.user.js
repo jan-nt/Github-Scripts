@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         General Background Session Keeper
 // @namespace    https://nidushan.com
-// @version      3.2.1
+// @version      3.2.2
 // @description  Keeps DIBS and Riverty sessions active and resumes login when their login pages appear
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -36,6 +36,9 @@
         {
             host: 'portal.dibspayment.eu',
             isLoginPage: () => location.pathname === '/',
+            detectByLoginForm: true,
+            requiresVerifiedForm: true,
+            requiresPasswordField: true,
             buttonXPath: '/html/body/div[2]/section/div/div[1]/div[2]/form/div[3]/button',
             fallbackSelectors: [
                 'form button[type="submit"]',
@@ -62,9 +65,18 @@
     let memoryNextRefreshTime = null;
 
     function getLoginPage() {
-        return LOGIN_PAGES.find(page =>
-            location.hostname === page.host && page.isLoginPage()
-        ) || null;
+        return LOGIN_PAGES.find(page => {
+            if (location.hostname !== page.host) return false;
+
+            const verifiedFormDetected = Boolean(
+                page.detectByLoginForm &&
+                findLoginCandidates(page, false).length === 1
+            );
+
+            return page.requiresVerifiedForm
+                ? verifiedFormDetected
+                : page.isLoginPage() || verifiedFormDetected;
+        }) || null;
     }
 
     function getElementByXPath(xpath) {
@@ -83,9 +95,6 @@
 
     function elementIsVisible(element) {
         if (!element || !element.isConnected || element.hidden) return false;
-        if (element.disabled || element.getAttribute('aria-disabled') === 'true') {
-            return false;
-        }
 
         try {
             const style = window.getComputedStyle(element);
@@ -108,7 +117,15 @@
         );
     }
 
-    function loginControlIsReady(element) {
+    function elementIsEnabled(element) {
+        return Boolean(
+            element &&
+            !element.disabled &&
+            element.getAttribute('aria-disabled') !== 'true'
+        );
+    }
+
+    function loginControlMatchesPage(element, page) {
         if (!elementIsVisible(element)) return false;
 
         const tagName = element.tagName?.toLowerCase();
@@ -124,26 +141,33 @@
 
         if (!form) return false;
 
-        try {
-            if (typeof form.checkValidity === 'function' && !form.checkValidity()) {
-                return false;
-            }
-        } catch {
+        if (
+            page.requiresPasswordField &&
+            !form.querySelector?.(
+                'input[type="password"]:not([disabled])'
+            )
+        ) {
             return false;
         }
 
-        const requiredInputs = form.querySelectorAll?.(
-            'input[required]:not([type="hidden"]):not([disabled])'
-        ) || [];
-
-        return Array.from(requiredInputs).every(input =>
-            input.type === 'checkbox' || input.type === 'radio'
-                ? input.checked
-                : String(input.value || '').trim() !== ''
-        );
+        return true;
     }
 
-    function findLoginButton(page) {
+    function loginControlIsReady(element, page) {
+        if (!loginControlMatchesPage(element, page)) return false;
+        if (!elementIsEnabled(element)) return false;
+
+        const form = element.form || element.closest?.('form');
+
+        try {
+            return typeof form.checkValidity === 'function' &&
+                form.checkValidity();
+        } catch {
+            return false;
+        }
+    }
+
+    function findLoginCandidates(page, requireReady = true) {
         const candidates = new Set();
         const xpathButton = getElementByXPath(page.buttonXPath);
 
@@ -159,9 +183,15 @@
             }
         }
 
-        const validCandidates = Array.from(candidates).filter(
-            loginControlIsReady
+        return Array.from(candidates).filter(candidate =>
+            requireReady
+                ? loginControlIsReady(candidate, page)
+                : loginControlMatchesPage(candidate, page)
         );
+    }
+
+    function findLoginButton(page) {
+        const validCandidates = findLoginCandidates(page);
 
         return validCandidates.length === 1 ? validCandidates[0] : null;
     }
