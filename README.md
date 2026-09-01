@@ -25,7 +25,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 
 | UserScript | Version | Target | Purpose |
 | --- | ---: | --- | --- |
-| General Background Session Keeper | 3.2.1 | DIBS and Riverty | Refreshes authenticated pages and safely retries an existing login control when a login page is detected. |
+| General Background Session Keeper | 3.2.2 | DIBS and Riverty | Refreshes authenticated background tabs and safely resumes login when a verified login form appears. |
 | General Custom Icons | 2.5.0 | PassPay and PayManager | Applies route-specific tab titles and favicons. |
 | PassPay Search Admin Panel | 7.6.1 | PassPay parking search | Summarizes parking data and hands an Area Manager and license plate to PayManager. |
 | PassPay UserAdmin | 2.0.3 | PassPay administration and DIBS | Adds safe Chain ID and Payment ID links, admin search helpers, and an explicitly armed batch-refund workflow. |
@@ -77,6 +77,11 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-09-01 DIBS dashboard login recovery
+
+- General Background Session Keeper 3.2.2 detects the verified DIBS login form even when it is rendered at `/dashboard` or a cache-busted dashboard URL. It waits for Google Autofill to make the form valid, clicks the single validated login control once, and never reads, stores, or modifies credential values.
+- Authenticated dashboard forms without a password field are ignored. Riverty login-path handling and five-minute background refresh behavior remain unchanged.
 
 ### 2026-09-01 silent PayManager column recovery
 

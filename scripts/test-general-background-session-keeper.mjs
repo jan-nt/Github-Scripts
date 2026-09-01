@@ -54,11 +54,30 @@ function createLoginButton({
     visible = true,
     tagName = 'BUTTON',
     type = 'submit',
-    throwOnClick = false
+    throwOnClick = false,
+    hasPasswordField = true,
+    credentialsFilled = true,
+    disabled = false
 } = {}) {
+    const requiredInputs = hasPasswordField
+        ? [
+            { type: 'text', value: credentialsFilled ? 'user' : '' },
+            { type: 'password', value: credentialsFilled ? 'secret' : '' }
+        ]
+        : [];
     const form = {
-        checkValidity: () => valid,
-        querySelectorAll: () => []
+        checkValidity: () =>
+            valid && requiredInputs.every(input => input.value !== ''),
+        querySelector(selector) {
+            if (selector.includes('input[type="password"]')) {
+                return requiredInputs.find(
+                    input => input.type === 'password'
+                ) || null;
+            }
+
+            return null;
+        },
+        querySelectorAll: () => requiredInputs
     };
 
     return {
@@ -66,16 +85,27 @@ function createLoginButton({
         type,
         form,
         hidden: false,
-        disabled: false,
+        disabled,
         isConnected: true,
         clicks: 0,
         getAttribute(name) {
             if (name === 'type') return type;
-            if (name === 'aria-disabled') return 'false';
+            if (name === 'aria-disabled') {
+                return this.disabled ? 'true' : 'false';
+            }
             return null;
         },
         getClientRects: () => visible ? [{}] : [],
         closest: selector => selector === 'form' ? form : null,
+        setCredentialsFilled(filled) {
+            for (const input of requiredInputs) {
+                input.value = filled ?
+                    (input.type === 'password' ? 'secret' : 'user') : '';
+            }
+        },
+        setDisabled(value) {
+            this.disabled = value;
+        },
         click() {
             this.clicks++;
             if (throwOnClick) throw new Error('simulated click failure');
@@ -87,6 +117,7 @@ function createLoginButton({
 function createScenario({
     hostname = 'portal.dibspayment.eu',
     pathname = '/portal-frontend/payments',
+    search = '',
     hidden = false,
     candidates = [],
     now = 0,
@@ -107,6 +138,7 @@ function createScenario({
     const location = {
         hostname,
         pathname,
+        search,
         reloads: 0,
         reload() {
             this.reloads++;
@@ -218,6 +250,16 @@ const refreshScenario = createScenario({
 refreshScenario.clock.advance(0);
 assert.equal(refreshScenario.location.reloads, 1);
 
+const fiveMinuteRefreshScenario = createScenario({ hidden: true });
+fiveMinuteRefreshScenario.clock.advance(5 * 60 * 1000 - 1);
+assert.equal(fiveMinuteRefreshScenario.location.reloads, 0);
+fiveMinuteRefreshScenario.clock.advance(1);
+assert.equal(
+    fiveMinuteRefreshScenario.location.reloads,
+    1,
+    'an authenticated background tab must refresh after five minutes'
+);
+
 const loginButton = createLoginButton();
 const loginScenario = createScenario({
     pathname: '/',
@@ -234,6 +276,98 @@ loginScenario.clock.advance(4 * 60 * 1000 + 30_000);
 assert.equal(loginScenario.location.reloads, 1);
 assert.equal(loginScenario.clock.timers.size, 0);
 
+const rootDashboardButton = createLoginButton({
+    hasPasswordField: false
+});
+const rootWithoutLoginFormScenario = createScenario({
+    pathname: '/',
+    candidates: [rootDashboardButton]
+});
+
+rootWithoutLoginFormScenario.clock.advance(5 * 60 * 1000 + 30_000);
+assert.equal(rootDashboardButton.clicks, 0);
+assert.equal(
+    rootWithoutLoginFormScenario.location.reloads,
+    0,
+    'DIBS root without a verified password form must not enter login recovery'
+);
+
+const dashboardLoginButton = createLoginButton();
+const dashboardLoginScenario = createScenario({
+    pathname: '/dashboard',
+    candidates: [dashboardLoginButton]
+});
+
+dashboardLoginScenario.clock.advance(0);
+assert.equal(
+    dashboardLoginButton.clicks,
+    1,
+    'a DIBS login form rendered on /dashboard must be submitted'
+);
+
+const timestampLoginButton = createLoginButton();
+const timestampLoginScenario = createScenario({
+    pathname: '/dashboard',
+    search: '?_t=1788265261874',
+    candidates: [timestampLoginButton]
+});
+
+timestampLoginScenario.clock.advance(0);
+assert.equal(
+    timestampLoginButton.clicks,
+    1,
+    'a DIBS dashboard URL with a cache-busting query must still log in'
+);
+
+const dashboardFormButton = createLoginButton({
+    hasPasswordField: false
+});
+const authenticatedDashboardScenario = createScenario({
+    pathname: '/dashboard',
+    candidates: [dashboardFormButton]
+});
+
+authenticatedDashboardScenario.clock.advance(30_000);
+assert.equal(
+    dashboardFormButton.clicks,
+    0,
+    'an authenticated dashboard form must not be treated as the login form'
+);
+
+const delayedAutofillButton = createLoginButton({
+    credentialsFilled: false
+});
+const delayedAutofillScenario = createScenario({
+    pathname: '/dashboard',
+    candidates: [delayedAutofillButton]
+});
+
+delayedAutofillScenario.clock.advance(10_000);
+assert.equal(delayedAutofillButton.clicks, 0);
+delayedAutofillButton.setCredentialsFilled(true);
+delayedAutofillScenario.clock.advance(1_000);
+assert.equal(
+    delayedAutofillButton.clicks,
+    1,
+    'DIBS login must wait for Google Autofill before clicking once'
+);
+
+const disabledAutofillButton = createLoginButton({ disabled: true });
+const disabledAutofillScenario = createScenario({
+    pathname: '/dashboard',
+    candidates: [disabledAutofillButton]
+});
+
+disabledAutofillScenario.clock.advance(10_000);
+assert.equal(disabledAutofillButton.clicks, 0);
+disabledAutofillButton.setDisabled(false);
+disabledAutofillScenario.clock.advance(1_000);
+assert.equal(
+    disabledAutofillButton.clicks,
+    1,
+    'DIBS login detection must keep watching a temporarily disabled submit control'
+);
+
 const ambiguousFirst = createLoginButton();
 const ambiguousSecond = createLoginButton();
 const ambiguousScenario = createScenario({
@@ -245,7 +379,11 @@ ambiguousScenario.clock.advance(30_000);
 assert.equal(ambiguousFirst.clicks, 0);
 assert.equal(ambiguousSecond.clicks, 0);
 ambiguousScenario.clock.advance(5 * 60 * 1000);
-assert.equal(ambiguousScenario.location.reloads, 1);
+assert.equal(
+    ambiguousScenario.location.reloads,
+    0,
+    'multiple DIBS login forms must fail closed without forced reloads'
+);
 
 const invalidButton = createLoginButton({ valid: false });
 const invalidScenario = createScenario({
