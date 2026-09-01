@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PayManager Column Controller
 // @namespace    https://nidushan.com
-// @version      1.2.1
+// @version      1.2.2
 // @description  Enable and disable selected PayManager columns automatically
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
@@ -177,21 +177,46 @@
             popupScreen?.classList?.contains('in');
     }
 
-    async function openColumnsPanel() {
-        const button = await waitFor(getColumnsButton);
+    async function openColumnsPanel({ reuseExisting = false } = {}) {
+        const availableControl = await waitFor(() => {
+            const popup = findColumnsPopup();
 
-        if (!button) return null;
+            if (popup) return { popup };
+
+            const button = getColumnsButton();
+            return button ? { button } : null;
+        });
+
+        if (!availableControl) {
+            return { popup: null, openedByController: false };
+        }
 
         const existingPopup = findColumnsPopup();
 
-        if (isColumnsPopupOpen(existingPopup)) return existingPopup;
+        if (
+            existingPopup &&
+            (reuseExisting || isColumnsPopupOpen(existingPopup))
+        ) {
+            return { popup: existingPopup, openedByController: false };
+        }
+
+        const button = availableControl.button || getColumnsButton();
+
+        if (!button) {
+            return { popup: existingPopup, openedByController: false };
+        }
 
         button.click();
 
-        return waitFor(() => {
+        const popup = await waitFor(() => {
             const popup = findColumnsPopup();
             return isColumnsPopupOpen(popup) ? popup : null;
         });
+
+        return {
+            popup,
+            openedByController: Boolean(popup)
+        };
     }
 
     function findColumnControl(columnClass) {
@@ -225,8 +250,18 @@
         }
     }
 
-    function closeColumnsPopup() {
-        const popup = findColumnsPopup();
+    function closeColumnsPopup(expectedPopup = null) {
+        const currentPopup = findColumnsPopup();
+        const popup = expectedPopup || currentPopup;
+
+        if (
+            !popup ||
+            (expectedPopup && currentPopup !== expectedPopup) ||
+            !isColumnsPopupOpen(popup)
+        ) {
+            return;
+        }
+
         const popupCloseControl = popup?.querySelector(
             '[data-rel="back"], [data-role="close"], .ui-popup-close'
         );
@@ -262,15 +297,21 @@
         state.rerunRequested = false;
 
         try {
-            const popup = await openColumnsPanel();
+            const {
+                popup,
+                openedByController
+            } = await openColumnsPanel({ reuseExisting: true });
 
             if (!popup) return;
 
             observeCurrentRoots(popup);
 
             await toggleColumns();
-            await sleep(CLOSE_POPUP_DELAY_MS);
-            closeColumnsPopup();
+
+            if (openedByController) {
+                await sleep(CLOSE_POPUP_DELAY_MS);
+                closeColumnsPopup(popup);
+            }
         } finally {
             state.inFlight = false;
 
