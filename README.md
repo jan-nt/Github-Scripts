@@ -29,7 +29,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 | General Custom Icons | 2.5.0 | PassPay and PayManager | Applies route-specific tab titles and favicons. |
 | PassPay Search Admin Panel | 7.6.1 | PassPay parking search | Summarizes parking data and hands an Area Manager and license plate to PayManager. |
 | PassPay UserAdmin | 2.0.3 | PassPay administration and DIBS | Adds safe Chain ID and Payment ID links, admin search helpers, and an explicitly armed batch-refund workflow. |
-| PayManager Column Controller | 1.2.1 | PayManager transactions | Automatically enforces the configured transaction-column visibility. |
+| PayManager Column Controller | 1.2.2 | PayManager transactions | Automatically enforces the configured transaction-column visibility without reopening an existing hidden Columns popup. |
 | PayManager Image Row Highlighter | 1.7.1 | PayManager transactions | Highlights rows that contain event-camera images. |
 | PayManager Parking User Selector | 2.10.3 | PayManager parking | Restores the selected PRS user, provides separator- and organization-suffix-aware PRS search, and performs opt-in, guarded Active/Pending plate searches. |
 | PayManager Search Input Normalizer | 1.0.1 | PayManager transactions and parking | Removes spaces and dashes from typed filter text. |
@@ -77,6 +77,10 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-09-01 silent PayManager column recovery
+
+- PayManager Column Controller 1.2.2 reuses PayManager's existing hidden column controls during initial setup and delayed DOM-replacement recovery. It only opens and closes the Columns popup when PayManager has not created those controls yet, preventing a late popup flash after scrolling or lazy rendering.
 
 ### 2026-08-31 organization-suffix-aware PRS matching
 
