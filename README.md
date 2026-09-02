@@ -31,7 +31,7 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 | PassPay UserAdmin | 2.0.3 | PassPay administration and DIBS | Adds safe Chain ID and Payment ID links, admin search helpers, and an explicitly armed batch-refund workflow. |
 | PayManager Column Controller | 1.2.2 | PayManager transactions | Automatically enforces the configured transaction-column visibility without reopening an existing hidden Columns popup. |
 | PayManager Image Row Highlighter | 1.7.1 | PayManager transactions | Highlights rows that contain event-camera images. |
-| PayManager Parking User Selector | 2.10.3 | PayManager parking | Restores the selected PRS user, provides separator- and organization-suffix-aware PRS search, and performs opt-in, guarded Active/Pending plate searches. |
+| PayManager Parking User Selector | 2.10.4 | PayManager parking | Restores the selected PRS user, provides separator- and organization-suffix-aware PRS search, and performs opt-in, guarded Pending/Active plate searches. |
 | PayManager Search Input Normalizer | 1.0.1 | PayManager transactions and parking | Removes spaces and dashes from typed filter text. |
 
 ## Privacy and security
@@ -77,6 +77,11 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-09-02 Pending-first PayManager parking handoff
+
+- PayManager Parking User Selector 2.10.4 now searches Pending parking sessions first after a PassPay handoff or an explicit license-plate search.
+- A verified Pending match stops the search immediately. Only a verified empty Pending result triggers one guarded fallback search in Active; existing PRS matching, table-settle waits, and duplicate-search protection remain unchanged.
 
 ### 2026-09-01 DIBS dashboard login recovery
 
