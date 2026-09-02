@@ -953,6 +953,51 @@ assert.equal(alreadyPending.getPendingClicks(), 0);
 assert.equal(alreadyPending.getPendingPlateDispatches(), 1);
 assert.equal(alreadyPending.status.textContent, 'Found in Pending: TEST123');
 
+// A reload during the Active fallback resumes Active without rechecking Pending.
+const resumedActiveFallback = createHandoffScenario({
+    initialStatus: 'pending'
+});
+resumedActiveFallback.setSessionValue(
+    'pm_parking_handoff_active_v1',
+    '["Example Manager","TEST123"]'
+);
+
+assert.equal(resumedActiveFallback.api.applyRequestedHandoff(), true);
+resumedActiveFallback.runTimers();
+
+assert.equal(resumedActiveFallback.getPendingClicks(), 0);
+assert.equal(resumedActiveFallback.getActiveClicks(), 1);
+assert.equal(resumedActiveFallback.getPendingPlateDispatches(), 0);
+assert.equal(resumedActiveFallback.getActivePlateDispatches(), 1);
+assert.equal(
+    resumedActiveFallback.status.textContent,
+    'Found in Active: TEST123'
+);
+
+// A legacy Active-first phase marker cannot make the new version skip Pending.
+const ignoredLegacyPendingPhase = createHandoffScenario();
+ignoredLegacyPendingPhase.setSessionValue(
+    'pm_parking_handoff_pending_v1',
+    '["Example Manager","TEST123"]'
+);
+
+assert.equal(ignoredLegacyPendingPhase.api.applyRequestedHandoff(), true);
+ignoredLegacyPendingPhase.runTimers();
+
+assert.equal(ignoredLegacyPendingPhase.getPendingClicks(), 1);
+assert.equal(ignoredLegacyPendingPhase.getActiveClicks(), 0);
+assert.equal(ignoredLegacyPendingPhase.getPendingPlateDispatches(), 1);
+assert.equal(
+    ignoredLegacyPendingPhase.status.textContent,
+    'Found in Pending: TEST123'
+);
+assert.equal(
+    ignoredLegacyPendingPhase.hasSessionValue(
+        'pm_parking_handoff_pending_v1'
+    ),
+    false
+);
+
 // Empty Pending and Active tables use the three-second readiness fallback.
 const emptyBoth = createHandoffScenario({
     activeInitialText: '0 0 0',
