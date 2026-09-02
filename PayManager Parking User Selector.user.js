@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.10.3
-// @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
+// @version      2.10.4
+// @description  Adds searchable PRS user and license-plate controls with guarded Pending/Active parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
 // @supportURL   mailto:jas@nortronic.com
@@ -43,12 +43,14 @@
     const AREA_MANAGER_PARAM = 'tmAreaManager';
     const LICENSE_PLATE_PARAM = 'tmLicensePlate';
     const HANDOFF_STORAGE_KEY = 'pm_parking_handoff_v1';
-    const HANDOFF_PENDING_STORAGE_KEY = 'pm_parking_handoff_pending_v1';
+    const HANDOFF_ACTIVE_STORAGE_KEY = 'pm_parking_handoff_active_v1';
+    const HANDOFF_LEGACY_PENDING_STORAGE_KEY =
+        'pm_parking_handoff_pending_v1';
     const HANDOFF_MAX_AGE_MS = 5 * 60 * 1000;
     const HANDOFF_RETRY_MS = 500;
     const HANDOFF_MAX_ATTEMPTS = 180;
     const HANDOFF_AREA_SETTLE_MS = 750;
-    const HANDOFF_PENDING_SETTLE_MS = 1500;
+    const HANDOFF_STATUS_SETTLE_MS = 1500;
     const HANDOFF_TABLE_READY_FALLBACK_MS = 3000;
     const HANDOFF_FILTER_RESULT_TIMEOUT_MS = 3000;
     const HANDOFF_PLATE_REAPPLY_MS = 500;
@@ -385,7 +387,10 @@
 
             if (isLegacyManualHandoff) {
                 sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-                sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+                sessionStorage.removeItem(
+                    HANDOFF_LEGACY_PENDING_STORAGE_KEY
+                );
             }
         } catch {
             try {
@@ -505,7 +510,10 @@
 
                 if (!areaManager && !isValidPlate(storedPlate)) {
                     sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-                    sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                    sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+                    sessionStorage.removeItem(
+                        HANDOFF_LEGACY_PENDING_STORAGE_KEY
+                    );
                     return {
                         areaManager: '',
                         licensePlate: '',
@@ -525,11 +533,15 @@
             }
 
             sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-            sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_LEGACY_PENDING_STORAGE_KEY);
         } catch {
             try {
                 sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-                sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+                sessionStorage.removeItem(
+                    HANDOFF_LEGACY_PENDING_STORAGE_KEY
+                );
             } catch {
                 // Ignore unavailable session storage.
             }
@@ -561,7 +573,8 @@
     function clearRequestedHandoff() {
         try {
             sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-            sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_LEGACY_PENDING_STORAGE_KEY);
         } catch {
             // Ignore unavailable session storage.
         }
@@ -672,19 +685,19 @@
         ]);
     }
 
-    function wasPendingStatusAttempted(handoff) {
+    function wasActiveStatusAttempted(handoff) {
         try {
-            return sessionStorage.getItem(HANDOFF_PENDING_STORAGE_KEY) ===
+            return sessionStorage.getItem(HANDOFF_ACTIVE_STORAGE_KEY) ===
                 getHandoffSignature(handoff);
         } catch {
             return false;
         }
     }
 
-    function markPendingStatusAttempted(handoff) {
+    function markActiveStatusAttempted(handoff) {
         try {
             sessionStorage.setItem(
-                HANDOFF_PENDING_STORAGE_KEY,
+                HANDOFF_ACTIVE_STORAGE_KEY,
                 getHandoffSignature(handoff)
             );
         } catch {
@@ -1171,8 +1184,8 @@
         let areaManagerAppliedAt = areaManagerApplied ? Date.now() : 0;
         let parkingStatusClickedAt = 0;
         let parkingStatusClickRequested = false;
-        let pendingStatusAttempted =
-            wasPendingStatusAttempted(initialHandoff);
+        let activeStatusAttempted =
+            wasActiveStatusAttempted(initialHandoff);
         let tableAction = getLatestTableActionSnapshot();
         let tableWaitStartedAt = null;
         let tableFilterCleared = false;
@@ -1292,20 +1305,20 @@
             setStatus(
                 isRepeat
                     ? `Confirming search for plate: ${handoff.licensePlate}`
-                    : `Searching ${pendingStatusAttempted ? 'Pending' : 'Active'} for: ${handoff.licensePlate}`
+                    : `Searching ${activeStatusAttempted ? 'Active' : 'Pending'} for: ${handoff.licensePlate}`
             );
         }
 
         function ensureRequestedParkingStatus(handoff) {
-            pendingStatusAttempted =
-                pendingStatusAttempted ||
-                wasPendingStatusAttempted(handoff);
+            activeStatusAttempted =
+                activeStatusAttempted ||
+                wasActiveStatusAttempted(handoff);
 
-            const wantsPending = pendingStatusAttempted;
-            const button = wantsPending
-                ? getPendingStatusButton()
-                : getActiveStatusButton();
-            const statusName = wantsPending ? 'Pending' : 'Active';
+            const wantsActive = activeStatusAttempted;
+            const button = wantsActive
+                ? getActiveStatusButton()
+                : getPendingStatusButton();
+            const statusName = wantsActive ? 'Active' : 'Pending';
 
             if (!button) {
                 failureMessage = `${statusName} parking status was not found`;
@@ -1327,19 +1340,19 @@
         }
 
         function finishCurrentStatusAsEmpty(handoff, input) {
-            if (!pendingStatusAttempted) {
-                markPendingStatusAttempted(handoff);
-                pendingStatusAttempted = true;
+            if (!activeStatusAttempted) {
+                markActiveStatusAttempted(handoff);
+                activeStatusAttempted = true;
                 parkingStatusClickedAt = 0;
                 parkingStatusClickRequested = false;
                 resetSearchPhase();
-                setStatus('No active entries. Switching to Pending...');
+                setStatus('No Pending entries. Switching to Active...');
                 return false;
             }
 
             clearRequestedHandoff();
             setStatus(
-                `No active or Pending entries found for: ${handoff.licensePlate}`,
+                `No Pending or Active entries found for: ${handoff.licensePlate}`,
                 '#a15c00'
             );
             (document.getElementById(PLATE_INPUT_ID) || input)?.focus();
@@ -1349,7 +1362,7 @@
         function finishMatchedResult(handoff, input) {
             clearRequestedHandoff();
             setStatus(
-                `Found in ${pendingStatusAttempted ? 'Pending' : 'Active'}: ${handoff.licensePlate}`,
+                `Found in ${activeStatusAttempted ? 'Active' : 'Pending'}: ${handoff.licensePlate}`,
                 'green'
             );
             input.focus();
@@ -1379,7 +1392,7 @@
                     lastTableEntriesText = '';
                     stableTableChecks = 0;
                     setStatus(
-                        `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                        `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                     );
                     return false;
                 }
@@ -1408,9 +1421,9 @@
 
             if (isParkingTableProcessing()) {
                 failureMessage =
-                    `${pendingStatusAttempted ? 'Pending' : 'Active'} table is still loading`;
+                    `${activeStatusAttempted ? 'Active' : 'Pending'} table is still loading`;
                 setStatus(
-                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                 );
                 return false;
             }
@@ -1426,9 +1439,9 @@
                 }
 
                 failureMessage =
-                    `${pendingStatusAttempted ? 'Pending' : 'Active'} table did not finish reloading`;
+                    `${activeStatusAttempted ? 'Active' : 'Pending'} table did not finish reloading`;
                 setStatus(
-                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                 );
                 return false;
             }
@@ -1438,7 +1451,7 @@
                 !fallbackElapsed
             ) {
                 setStatus(
-                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                 );
                 return false;
             }
@@ -1468,7 +1481,7 @@
                 stableResultChecks = 0;
                 lastEntriesText = '';
                 setStatus(
-                    `Waiting for ${pendingStatusAttempted ? 'Pending' : 'Active'} search results...`
+                    `Waiting for ${activeStatusAttempted ? 'Active' : 'Pending'} search results...`
                 );
                 return false;
             }
@@ -1584,7 +1597,7 @@
                 ensureRequestedParkingStatus(handoff);
             const parkingStatusSettled =
                 !parkingStatusClickedAt ||
-                Date.now() - parkingStatusClickedAt >= HANDOFF_PENDING_SETTLE_MS;
+                Date.now() - parkingStatusClickedAt >= HANDOFF_STATUS_SETTLE_MS;
 
             if (parkingStatusReady && parkingStatusSettled) {
                 const input = getParkingSearchInput();

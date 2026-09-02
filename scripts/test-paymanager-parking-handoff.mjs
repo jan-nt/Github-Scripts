@@ -772,10 +772,11 @@ function verifyUrlHandoff({
     assert.equal(scenario.select.value, expectedValue);
     assert.equal(scenario.input.value, licensePlate.replace(/[\s-]+/g, ''));
     assert.equal(scenario.plateEditor.value, licensePlate.replace(/[\s-]+/g, ''));
-    assert.equal(scenario.getActivePlateDispatches(), 1);
+    assert.equal(scenario.getPendingPlateDispatches(), 1);
+    assert.equal(scenario.getActivePlateDispatches(), 0);
     assert.equal(
         scenario.status.textContent,
-        `Found in Active: ${licensePlate.replace(/[\s-]+/g, '')}`
+        `Found in Pending: ${licensePlate.replace(/[\s-]+/g, '')}`
     );
 
     const selectionIndex = scenario.getEventTimeline().findIndex(
@@ -901,56 +902,58 @@ assert.equal(
 );
 assert.equal(ambiguousHandoff.getActivePlateDispatches(), 0);
 
-// A positive Active result must stop without a redundant dispatch, even when
+// A positive Pending result must stop without checking Active, even when
 // the plate reapply interval matches the handoff retry interval.
-const activeMatch = createHandoffScenario({
-    activeApplyAfterDispatches: 2,
+const pendingMatch = createHandoffScenario({
+    pendingApplyAfterDispatches: 2,
     plateReapplyMs: 500
 });
 
-assert.equal(activeMatch.runScriptAgain(), true);
-
-assert.equal(activeMatch.api.applyRequestedHandoff(), true);
-activeMatch.runTimers();
-
-assert.equal(activeMatch.input.value, 'TEST123');
-assert.equal(activeMatch.plateEditor.value, 'TEST123');
-assert.equal(activeMatch.input.focused, true);
-assert.equal(activeMatch.getActiveClicks(), 0);
-assert.equal(activeMatch.getPendingClicks(), 0);
-assert.equal(activeMatch.getActivePlateDispatches(), 2);
-assert.deepEqual(activeMatch.select.dispatchedEvents, []);
-assert.equal(activeMatch.getCleanUrl(), '/parking');
-assert.equal(activeMatch.status.textContent, 'Found in Active: TEST123');
-
-// A stable zero Active result waits three seconds, then searches Pending.
-const pendingMatch = createHandoffScenario({
-    activeFilteredText: '0 0 69'
-});
+assert.equal(pendingMatch.runScriptAgain(), true);
 
 assert.equal(pendingMatch.api.applyRequestedHandoff(), true);
 pendingMatch.runTimers();
 
+assert.equal(pendingMatch.input.value, 'TEST123');
+assert.equal(pendingMatch.plateEditor.value, 'TEST123');
+assert.equal(pendingMatch.input.focused, true);
 assert.equal(pendingMatch.getActiveClicks(), 0);
 assert.equal(pendingMatch.getPendingClicks(), 1);
-assert.ok(pendingMatch.getActivePlateDispatches() >= 1);
-assert.ok(pendingMatch.getPendingPlateDispatches() >= 1);
-assert.equal(pendingMatch.input.value, 'TEST123');
+assert.equal(pendingMatch.getPendingPlateDispatches(), 2);
+assert.equal(pendingMatch.getActivePlateDispatches(), 0);
+assert.deepEqual(pendingMatch.select.dispatchedEvents, []);
+assert.equal(pendingMatch.getCleanUrl(), '/parking');
 assert.equal(pendingMatch.status.textContent, 'Found in Pending: TEST123');
 
-// If PayManager opens on Pending, the script still reviews Active first.
-const pendingFirst = createHandoffScenario({
+// A stable zero Pending result waits three seconds, then searches Active.
+const activeFallbackMatch = createHandoffScenario({
+    pendingFilteredText: '0 0 38'
+});
+
+assert.equal(activeFallbackMatch.api.applyRequestedHandoff(), true);
+activeFallbackMatch.runTimers();
+
+assert.equal(activeFallbackMatch.getPendingClicks(), 1);
+assert.equal(activeFallbackMatch.getActiveClicks(), 1);
+assert.ok(activeFallbackMatch.getPendingPlateDispatches() >= 1);
+assert.ok(activeFallbackMatch.getActivePlateDispatches() >= 1);
+assert.equal(activeFallbackMatch.input.value, 'TEST123');
+assert.equal(activeFallbackMatch.status.textContent, 'Found in Active: TEST123');
+
+// If PayManager opens on Pending, the script searches it without switching.
+const alreadyPending = createHandoffScenario({
     initialStatus: 'pending'
 });
 
-assert.equal(pendingFirst.api.applyRequestedHandoff(), true);
-pendingFirst.runTimers();
+assert.equal(alreadyPending.api.applyRequestedHandoff(), true);
+alreadyPending.runTimers();
 
-assert.equal(pendingFirst.getActiveClicks(), 1);
-assert.equal(pendingFirst.getPendingClicks(), 0);
-assert.equal(pendingFirst.status.textContent, 'Found in Active: TEST123');
+assert.equal(alreadyPending.getActiveClicks(), 0);
+assert.equal(alreadyPending.getPendingClicks(), 0);
+assert.equal(alreadyPending.getPendingPlateDispatches(), 1);
+assert.equal(alreadyPending.status.textContent, 'Found in Pending: TEST123');
 
-// A table with no rows uses the three-second readiness fallback before Pending.
+// Empty Pending and Active tables use the three-second readiness fallback.
 const emptyBoth = createHandoffScenario({
     activeInitialText: '0 0 0',
     activeFilteredText: '0 0 0',
@@ -961,30 +964,41 @@ const emptyBoth = createHandoffScenario({
 assert.equal(emptyBoth.api.applyRequestedHandoff(), true);
 emptyBoth.runTimers();
 
+const activeClick = emptyBoth.getStatusClickTimes().find(
+    event => event.status === 'active'
+);
 const pendingClick = emptyBoth.getStatusClickTimes().find(
     event => event.status === 'pending'
 );
 
-assert.ok(pendingClick, 'Expected the Pending status fallback');
-assert.ok(pendingClick.at >= 3000, 'Pending was selected before the table fallback');
-assert.ok(pendingClick.at < 5000, 'Pending did not use the faster table fallback');
+assert.ok(pendingClick, 'Expected Pending to be selected first');
+assert.ok(activeClick, 'Expected the Active status fallback');
+assert.ok(
+    activeClick.at - pendingClick.at >= 3000,
+    'Active was selected before the Pending table fallback'
+);
+assert.ok(
+    activeClick.at - pendingClick.at < 6000,
+    'Active did not use the bounded Pending table fallback'
+);
 assert.equal(emptyBoth.getActivePlateDispatches(), 0);
 assert.equal(emptyBoth.getPendingPlateDispatches(), 0);
 assert.equal(
     emptyBoth.status.textContent,
-    'No active or Pending entries found for: TEST123'
+    'No Pending or Active entries found for: TEST123'
 );
 
 // An ignored filter must not turn an unchanged unfiltered table into a match.
 const ignoredFilter = createHandoffScenario({
-    activeFilteredText: '1 10 69',
-    activeFilteredRowMode: 'mismatch'
+    initialStatus: 'pending',
+    pendingFilteredText: '1 10 38',
+    pendingFilteredRowMode: 'mismatch'
 });
 
 assert.equal(ignoredFilter.api.applyRequestedHandoff(), true);
 ignoredFilter.runTimers();
 
-assert.equal(ignoredFilter.getPendingClicks(), 0);
+assert.equal(ignoredFilter.getActiveClicks(), 0);
 assert.equal(
     ignoredFilter.status.textContent,
     'PayManager did not apply the plate filter for: TEST123'
@@ -996,14 +1010,15 @@ assert.ok(
 
 // A positive summary is not a match unless a rendered row contains the plate.
 const mismatchedRows = createHandoffScenario({
-    activeFilteredText: '1 1 69',
-    activeFilteredRowMode: 'mismatch'
+    initialStatus: 'pending',
+    pendingFilteredText: '1 1 38',
+    pendingFilteredRowMode: 'mismatch'
 });
 
 assert.equal(mismatchedRows.api.applyRequestedHandoff(), true);
 mismatchedRows.runTimers();
 
-assert.equal(mismatchedRows.getPendingClicks(), 0);
+assert.equal(mismatchedRows.getActiveClicks(), 0);
 assert.equal(
     mismatchedRows.status.textContent,
     'PayManager returned rows, but none matched: TEST123'
@@ -1030,7 +1045,7 @@ assert.equal(identicalRedraw.api.hasTableChangedSince(tableAction), false);
 identicalRedraw.triggerTableMutation();
 assert.equal(identicalRedraw.api.hasTableChangedSince(tableAction), true);
 
-// Expired handoffs also remove the pending-status signature containing the plate.
+// Expired handoffs remove both current and legacy status-phase signatures.
 const expiredHandoff = createHandoffScenario({ locationHash: '' });
 expiredHandoff.setSessionValue(
     'pm_parking_handoff_v1',
@@ -1041,11 +1056,19 @@ expiredHandoff.setSessionValue(
     })
 );
 expiredHandoff.setSessionValue(
+    'pm_parking_handoff_active_v1',
+    '["Expired Manager","OLD123"]'
+);
+expiredHandoff.setSessionValue(
     'pm_parking_handoff_pending_v1',
     '["Expired Manager","OLD123"]'
 );
 expiredHandoff.api.getEffectiveHandoff();
 assert.equal(expiredHandoff.hasSessionValue('pm_parking_handoff_v1'), false);
+assert.equal(
+    expiredHandoff.hasSessionValue('pm_parking_handoff_active_v1'),
+    false
+);
 assert.equal(
     expiredHandoff.hasSessionValue('pm_parking_handoff_pending_v1'),
     false
@@ -1085,6 +1108,10 @@ normalReview.setSessionValue(
     })
 );
 normalReview.setSessionValue(
+    'pm_parking_handoff_active_v1',
+    '["","OLD123"]'
+);
+normalReview.setSessionValue(
     'pm_parking_handoff_pending_v1',
     '["","OLD123"]'
 );
@@ -1106,6 +1133,10 @@ assert.equal(normalReview.input.value, '');
 assert.equal(normalReview.plateEditor.value, '');
 assert.equal(normalReview.getActivePlateDispatches(), 0);
 assert.equal(normalReview.hasSessionValue('pm_parking_handoff_v1'), false);
+assert.equal(
+    normalReview.hasSessionValue('pm_parking_handoff_active_v1'),
+    false
+);
 assert.equal(
     normalReview.hasSessionValue('pm_parking_handoff_pending_v1'),
     false
@@ -1131,7 +1162,7 @@ dynamicPlate.plateEditor.value = ' xy-123 ';
 dynamicPlate.plateEditor.emit('input');
 dynamicPlate.runTimers();
 assert.equal(dynamicPlate.input.value, 'XY123');
-assert.equal(dynamicPlate.status.textContent, 'Found in Active: XY123');
+assert.equal(dynamicPlate.status.textContent, 'Found in Pending: XY123');
 assert.equal(
     dynamicPlate.getDispatchedEvents().every(event => event.type === 'input'),
     true,
@@ -1188,23 +1219,23 @@ assert.equal(
 );
 
 // Changing the editable plate starts the same guarded search again.
-assert.equal(activeMatch.api.restartParkingSearch(' alt-456 '), true);
-activeMatch.runTimers();
+assert.equal(pendingMatch.api.restartParkingSearch(' alt-456 '), true);
+pendingMatch.runTimers();
 
-assert.equal(activeMatch.input.value, 'ALT456');
-assert.equal(activeMatch.plateEditor.value, 'ALT456');
-assert.equal(activeMatch.status.textContent, 'Found in Active: ALT456');
+assert.equal(pendingMatch.input.value, 'ALT456');
+assert.equal(pendingMatch.plateEditor.value, 'ALT456');
+assert.equal(pendingMatch.status.textContent, 'Found in Pending: ALT456');
 
 assert.equal(
-    activeMatch.api.isEmptyEntriesText('Showing 0 to 0 of 0 entries'),
+    pendingMatch.api.isEmptyEntriesText('Showing 0 to 0 of 0 entries'),
     true
 );
-assert.equal(activeMatch.api.isEmptyEntriesText('0 0'), true);
-assert.equal(activeMatch.api.isEmptyEntriesText('0 0 (38)'), true);
+assert.equal(pendingMatch.api.isEmptyEntriesText('0 0'), true);
+assert.equal(pendingMatch.api.isEmptyEntriesText('0 0 (38)'), true);
 assert.equal(
-    activeMatch.api.isEntriesSummaryText('Showing 1 to 3 of 3 entries'),
+    pendingMatch.api.isEntriesSummaryText('Showing 1 to 3 of 3 entries'),
     true
 );
-assert.equal(activeMatch.api.isEntriesSummaryText('1 1 69'), true);
+assert.equal(pendingMatch.api.isEntriesSummaryText('1 1 69'), true);
 
 console.log('PayManager parking handoff tests passed.');
