@@ -25,13 +25,13 @@ Open a link in a browser with Tampermonkey installed and confirm the installatio
 
 | UserScript | Version | Target | Purpose |
 | --- | ---: | --- | --- |
-| General Background Session Keeper | 3.2.1 | DIBS and Riverty | Refreshes authenticated pages and safely retries an existing login control when a login page is detected. |
+| General Background Session Keeper | 3.2.2 | DIBS and Riverty | Refreshes authenticated background tabs and safely resumes login when a verified login form appears. |
 | General Custom Icons | 2.5.0 | PassPay and PayManager | Applies route-specific tab titles and favicons. |
 | PassPay Search Admin Panel | 7.6.1 | PassPay parking search | Summarizes parking data and hands an Area Manager and license plate to PayManager. |
 | PassPay UserAdmin | 2.0.3 | PassPay administration and DIBS | Adds safe Chain ID and Payment ID links, admin search helpers, and an explicitly armed batch-refund workflow. |
-| PayManager Column Controller | 1.2.1 | PayManager transactions | Automatically enforces the configured transaction-column visibility. |
+| PayManager Column Controller | 1.2.2 | PayManager transactions | Automatically enforces the configured transaction-column visibility without reopening an existing hidden Columns popup. |
 | PayManager Image Row Highlighter | 1.7.1 | PayManager transactions | Highlights rows that contain event-camera images. |
-| PayManager Parking User Selector | 2.10.0 | PayManager parking | Restores the selected PRS user, provides separator-insensitive PRS search, and performs opt-in, guarded Active/Pending plate searches. |
+| PayManager Parking User Selector | 2.10.4 | PayManager parking | Restores the selected PRS user, provides separator- and organization-suffix-aware PRS search, and performs opt-in, guarded Pending/Active plate searches. |
 | PayManager Search Input Normalizer | 1.0.1 | PayManager transactions and parking | Removes spaces and dashes from typed filter text. |
 
 ## Privacy and security
@@ -77,6 +77,35 @@ node scripts/test-passpay-search-admin-panel.mjs
 Add `--verify-remote` to download each external `@require` file and verify its declared SHA-256 hash. The validation script checks metadata, raw installation URLs, HTTPS-only page scopes, the support address, external-resource integrity, obvious secret patterns, debug statements, and README install links. GitHub Actions runs all checks, including remote integrity verification, for pushes to `main` and pull requests. Dependabot checks the pinned workflow action monthly.
 
 ## Release notes
+
+### 2026-09-02 Pending-first PayManager parking handoff
+
+- PayManager Parking User Selector 2.10.4 now searches Pending parking sessions first after a PassPay handoff or an explicit license-plate search.
+- A verified Pending match stops the search immediately. Only a verified empty Pending result triggers one guarded fallback search in Active; existing PRS matching, table-settle waits, and duplicate-search protection remain unchanged.
+
+### 2026-09-01 DIBS dashboard login recovery
+
+- General Background Session Keeper 3.2.2 detects the verified DIBS login form even when it is rendered at `/dashboard` or a cache-busted dashboard URL. It waits for Google Autofill to make the form valid, clicks the single validated login control once, and never reads, stores, or modifies credential values.
+- Authenticated dashboard forms without a password field are ignored. Riverty login-path handling and five-minute background refresh behavior remain unchanged.
+
+### 2026-09-01 silent PayManager column recovery
+
+- PayManager Column Controller 1.2.2 reuses PayManager's existing hidden column controls during initial setup and delayed DOM-replacement recovery. It only opens and closes the Columns popup when PayManager has not created those controls yet, preventing a late popup flash after scrolling or lazy rendering.
+
+### 2026-08-31 organization-suffix-aware PRS matching
+
+- PayManager Parking User Selector 2.10.3 recognizes controlled organization suffix differences such as `SA`, `AS`, `HF`, `Kommune`, and `User`. This allows `VegenGulsvikDamtjern`, `HelseFonnaHF`, and `Foglefonna` handoffs to select `Vegen Gulsvik-Damtjern SA`, `Helse Fonna AS`, and `FoglefonnaUser` respectively.
+- Exact normalized matches remain the highest priority. The suffix-aware fallback only selects a user when exactly one PRS option has the same organization stem; ambiguous matches stop for manual selection.
+
+### 2026-08-31 reliable PassPay-to-PayManager handoff
+
+- PayManager Parking User Selector 2.10.2 uses the same separator-insensitive PRS matching rules for direct searches and PassPay URL handoffs, so compact names such as `MoskenesKommune` and `NesbyenHedalen` select `Moskenes Kommune` and `Nesbyen-Hedalen` respectively.
+- Automatic handoffs now require one unique normalized PRS match and a valid license plate, wait for delayed PRS options, and stop with a clear message instead of selecting when the match is missing or ambiguous.
+
+### 2026-08-28 PayManager parking search timing
+
+- PayManager Parking User Selector 2.10.1 reduces the bounded table-readiness and filter-result waits from five seconds to three seconds and reapplies a handed-off license plate after 500 milliseconds when the page has not yet accepted it.
+- Once a matching filtered result is visible, the script now waits for the required stable observation without sending a redundant third search-input event.
 
 ### 2026-08-28 separator-insensitive PRS user search
 

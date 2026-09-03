@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PayManager Parking User Selector
 // @namespace    https://nidushan.com
-// @version      2.10.0
-// @description  Adds searchable PRS user and license-plate controls with guarded Active/Pending parking searches
+// @version      2.10.4
+// @description  Adds searchable PRS user and license-plate controls with guarded Pending/Active parking searches
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
 // @supportURL   mailto:jas@nortronic.com
@@ -43,7 +43,9 @@
     const AREA_MANAGER_PARAM = 'tmAreaManager';
     const LICENSE_PLATE_PARAM = 'tmLicensePlate';
     const HANDOFF_STORAGE_KEY = 'pm_parking_handoff_v1';
-    const HANDOFF_PENDING_STORAGE_KEY = 'pm_parking_handoff_pending_v1';
+    const HANDOFF_ACTIVE_STORAGE_KEY = 'pm_parking_handoff_active_v1';
+    const HANDOFF_LEGACY_PENDING_STORAGE_KEY =
+        'pm_parking_handoff_pending_v1';
     const HANDOFF_MAX_AGE_MS = 5 * 60 * 1000;
     const HANDOFF_RETRY_MS = 500;
     const HANDOFF_MAX_ATTEMPTS = 180;
@@ -123,6 +125,71 @@
         );
     }
 
+    const PRS_OPTIONAL_ORGANIZATION_SUFFIXES = [
+        'PRSUser',
+        'Kommune',
+        'User',
+        'ASA',
+        'IKS',
+        'HF',
+        'KF',
+        'SF',
+        'BA',
+        'AS',
+        'SA'
+    ];
+    const PRS_MIN_ORGANIZATION_STEM_LENGTH = 5;
+    const PRS_SUFFIX_SEPARATOR_PATTERN =
+        '[\\s\\u00A0\\u2007\\u202F._/\\\\\\-\\u2010-\\u2015\\u2212\\uFE58\\uFE63\\uFF0D]+';
+
+    function getPrsOrganizationStem(text) {
+        let remaining = String(text || '')
+            .trim()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+        let suffixRemoved = true;
+        let removedCount = 0;
+
+        while (suffixRemoved) {
+            suffixRemoved = false;
+
+            for (const suffix of PRS_OPTIONAL_ORGANIZATION_SUFFIXES) {
+                const separatedSuffix = new RegExp(
+                    `${PRS_SUFFIX_SEPARATOR_PATTERN}${suffix}$`,
+                    'i'
+                );
+                const separatedMatch = remaining.match(separatedSuffix);
+                let candidate = null;
+
+                if (separatedMatch) {
+                    candidate = remaining.slice(0, separatedMatch.index).trim();
+                } else if (remaining.endsWith(suffix)) {
+                    const prefix = remaining.slice(0, -suffix.length);
+
+                    if (/[a-z0-9]$/.test(prefix)) {
+                        candidate = prefix;
+                    }
+                }
+
+                if (
+                    candidate &&
+                    compactPrsSearchKey(candidate).length >=
+                        PRS_MIN_ORGANIZATION_STEM_LENGTH
+                ) {
+                    remaining = candidate;
+                    suffixRemoved = true;
+                    removedCount += 1;
+                    break;
+                }
+            }
+        }
+
+        return {
+            stem: compactPrsSearchKey(remaining),
+            suffixRemoved: removedCount > 0
+        };
+    }
+
     function normalizePlate(value) {
         return String(value || '')
             .trim()
@@ -161,61 +228,91 @@
         }));
     }
 
-    function findPrsSearchMatches(options, rawQuery) {
+    function createPrsMatch(option, rawQuery) {
         const query = normalize(String(rawQuery || '').trim());
 
-        if (!query) return [];
+        if (!query) return null;
 
         const compactQuery = compactPrsSearchKey(query);
+        const label = normalize(option.label);
+        const value = normalize(option.value);
+        const compactLabel = compactPrsSearchKey(label);
+        const compactValue = compactPrsSearchKey(value);
+        const exactReliable = Boolean(
+            query &&
+            (
+                label === query ||
+                value === query ||
+                (
+                    compactQuery &&
+                    (
+                        compactLabel === compactQuery ||
+                        compactValue === compactQuery
+                    )
+                )
+            )
+        );
+        const queryStem = getPrsOrganizationStem(rawQuery);
+        const labelStem = getPrsOrganizationStem(option.label);
+        const suffixReliable = Boolean(
+            queryStem.stem &&
+            labelStem.stem === queryStem.stem &&
+            (queryStem.suffixRemoved || labelStem.suffixRemoved)
+        );
+        let score = 0;
+
+        if (label === query) score += 100;
+        if (label.startsWith(query)) score += 80;
+        if (label.includes(query)) score += 50;
+        if (value === query) score += 90;
+        if (value.startsWith(query)) score += 60;
+        if (value.includes(query)) score += 40;
+
+        if (
+            compactQuery &&
+            compactLabel &&
+            (compactLabel !== label || compactQuery !== query)
+        ) {
+            if (compactLabel === compactQuery) {
+                score = Math.max(score, 200);
+            } else if (compactLabel.startsWith(compactQuery)) {
+                score = Math.max(score, 120);
+            } else if (compactLabel.includes(compactQuery)) {
+                score = Math.max(score, 45);
+            }
+        }
+
+        if (
+            compactQuery &&
+            compactValue &&
+            (compactValue !== value || compactQuery !== query)
+        ) {
+            if (compactValue === compactQuery) {
+                score = Math.max(score, 180);
+            } else if (compactValue.startsWith(compactQuery)) {
+                score = Math.max(score, 100);
+            } else if (compactValue.includes(compactQuery)) {
+                score = Math.max(score, 35);
+            }
+        }
+
+        if (suffixReliable) {
+            score = Math.max(score, 160);
+        }
+
+        return {
+            ...option,
+            score,
+            exactReliable,
+            suffixReliable
+        };
+    }
+
+    function findPrsSearchMatches(options, rawQuery) {
+        if (!normalize(String(rawQuery || '').trim())) return [];
 
         return options
-            .map(option => {
-                const label = normalize(option.label);
-                const value = normalize(option.value);
-                const compactLabel = compactPrsSearchKey(label);
-                const compactValue = compactPrsSearchKey(value);
-                let score = 0;
-
-                if (label === query) score += 100;
-                if (label.startsWith(query)) score += 80;
-                if (label.includes(query)) score += 50;
-                if (value === query) score += 90;
-                if (value.startsWith(query)) score += 60;
-                if (value.includes(query)) score += 40;
-
-                if (
-                    compactQuery &&
-                    compactLabel &&
-                    (compactLabel !== label || compactQuery !== query)
-                ) {
-                    if (compactLabel === compactQuery) {
-                        score = Math.max(score, 200);
-                    } else if (compactLabel.startsWith(compactQuery)) {
-                        score = Math.max(score, 120);
-                    } else if (compactLabel.includes(compactQuery)) {
-                        score = Math.max(score, 45);
-                    }
-                }
-
-                if (
-                    compactQuery &&
-                    compactValue &&
-                    (compactValue !== value || compactQuery !== query)
-                ) {
-                    if (compactValue === compactQuery) {
-                        score = Math.max(score, 180);
-                    } else if (compactValue.startsWith(compactQuery)) {
-                        score = Math.max(score, 100);
-                    } else if (compactValue.includes(compactQuery)) {
-                        score = Math.max(score, 35);
-                    }
-                }
-
-                return {
-                    ...option,
-                    score
-                };
-            })
+            .map(option => createPrsMatch(option, rawQuery))
             .filter(option => option.score > 0)
             .sort((a, b) => {
                 if (b.score !== a.score) {
@@ -224,6 +321,26 @@
 
                 return a.label.localeCompare(b.label);
             });
+    }
+
+    function findReliablePrsMatch(options, rawQuery) {
+        const matches = findPrsSearchMatches(options, rawQuery);
+        const exactMatches = matches.filter(option => option.exactReliable);
+        const reliableMatches = exactMatches.length > 0
+            ? exactMatches
+            : matches.filter(option => option.suffixReliable);
+
+        if (reliableMatches.length === 1) {
+            return {
+                status: 'matched',
+                option: reliableMatches[0]
+            };
+        }
+
+        return {
+            status: reliableMatches.length > 1 ? 'ambiguous' : 'not-found',
+            option: null
+        };
     }
 
     function getOptionByValue(value) {
@@ -270,7 +387,10 @@
 
             if (isLegacyManualHandoff) {
                 sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-                sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+                sessionStorage.removeItem(
+                    HANDOFF_LEGACY_PENDING_STORAGE_KEY
+                );
             }
         } catch {
             try {
@@ -325,23 +445,48 @@
         const hasUrlHandoff =
             params.has(AREA_MANAGER_PARAM) ||
             params.has(LICENSE_PLATE_PARAM);
+        const rawAreaManager = String(
+            params.get(AREA_MANAGER_PARAM) || ''
+        ).trim();
+        const rawLicensePlate = String(
+            params.get(LICENSE_PLATE_PARAM) || ''
+        ).trim();
         const urlPlate = normalizePlate(
-            params.get(LICENSE_PLATE_PARAM)
+            rawLicensePlate
         );
+        let validationError = '';
+
+        if (hasUrlHandoff) {
+            if (!rawAreaManager) {
+                validationError =
+                    'PayManager handoff is missing the Area Manager.';
+            } else if (
+                rawAreaManager.length > 200 ||
+                !compactPrsSearchKey(rawAreaManager) ||
+                /[\u0000-\u001F\u007F]/.test(rawAreaManager)
+            ) {
+                validationError =
+                    'PayManager handoff has an invalid Area Manager.';
+            } else if (!rawLicensePlate) {
+                validationError =
+                    'PayManager handoff is missing the license plate.';
+            } else if (!isValidPlate(urlPlate)) {
+                validationError =
+                    'PayManager handoff has an invalid license plate.';
+            }
+        }
+
         const fromUrl = {
-            areaManager: String(params.get(AREA_MANAGER_PARAM) || '').trim(),
+            areaManager: rawAreaManager,
             licensePlate: isValidPlate(urlPlate) ? urlPlate : '',
-            explicit: hasUrlHandoff
+            explicit: hasUrlHandoff,
+            validationError
         };
 
         if (hasUrlHandoff) {
-            if (!fromUrl.areaManager && !fromUrl.licensePlate) {
+            if (validationError) {
                 clearRequestedHandoff();
-                return {
-                    areaManager: '',
-                    licensePlate: '',
-                    explicit: false
-                };
+                return fromUrl;
             }
 
             savePendingHandoff(fromUrl);
@@ -365,7 +510,10 @@
 
                 if (!areaManager && !isValidPlate(storedPlate)) {
                     sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-                    sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                    sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+                    sessionStorage.removeItem(
+                        HANDOFF_LEGACY_PENDING_STORAGE_KEY
+                    );
                     return {
                         areaManager: '',
                         licensePlate: '',
@@ -385,11 +533,15 @@
             }
 
             sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-            sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_LEGACY_PENDING_STORAGE_KEY);
         } catch {
             try {
                 sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-                sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+                sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+                sessionStorage.removeItem(
+                    HANDOFF_LEGACY_PENDING_STORAGE_KEY
+                );
             } catch {
                 // Ignore unavailable session storage.
             }
@@ -421,7 +573,8 @@
     function clearRequestedHandoff() {
         try {
             sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
-            sessionStorage.removeItem(HANDOFF_PENDING_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_ACTIVE_STORAGE_KEY);
+            sessionStorage.removeItem(HANDOFF_LEGACY_PENDING_STORAGE_KEY);
         } catch {
             // Ignore unavailable session storage.
         }
@@ -532,19 +685,19 @@
         ]);
     }
 
-    function wasPendingStatusAttempted(handoff) {
+    function wasActiveStatusAttempted(handoff) {
         try {
-            return sessionStorage.getItem(HANDOFF_PENDING_STORAGE_KEY) ===
+            return sessionStorage.getItem(HANDOFF_ACTIVE_STORAGE_KEY) ===
                 getHandoffSignature(handoff);
         } catch {
             return false;
         }
     }
 
-    function markPendingStatusAttempted(handoff) {
+    function markActiveStatusAttempted(handoff) {
         try {
             sessionStorage.setItem(
-                HANDOFF_PENDING_STORAGE_KEY,
+                HANDOFF_ACTIVE_STORAGE_KEY,
                 getHandoffSignature(handoff)
             );
         } catch {
@@ -805,18 +958,8 @@
         input.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
-    function findAreaManagerOption(areaManager) {
-        const exact = getOptionByLabel(areaManager);
-        if (exact) return exact;
-
-        const wanted = normalize(areaManager);
-        const partialMatches = getOptions().filter(option => {
-            const label = normalize(option.label);
-            if (!label) return false;
-            return label.includes(wanted) || wanted.includes(label);
-        });
-
-        return partialMatches.length === 1 ? partialMatches[0] : null;
+    function findAreaManagerMatch(areaManager) {
+        return findReliablePrsMatch(getOptions(), areaManager);
     }
 
     function setStatus(message, color = '#444') {
@@ -1024,6 +1167,11 @@
     function applyRequestedHandoff() {
         const initialHandoff = getEffectiveHandoff();
 
+        if (initialHandoff.validationError) {
+            setStatus(initialHandoff.validationError, 'red');
+            return false;
+        }
+
         if (!initialHandoff.areaManager && !initialHandoff.licensePlate) {
             return false;
         }
@@ -1036,8 +1184,8 @@
         let areaManagerAppliedAt = areaManagerApplied ? Date.now() : 0;
         let parkingStatusClickedAt = 0;
         let parkingStatusClickRequested = false;
-        let pendingStatusAttempted =
-            wasPendingStatusAttempted(initialHandoff);
+        let activeStatusAttempted =
+            wasActiveStatusAttempted(initialHandoff);
         let tableAction = getLatestTableActionSnapshot();
         let tableWaitStartedAt = null;
         let tableFilterCleared = false;
@@ -1053,6 +1201,7 @@
         let lastEntriesText = '';
         let stableResultChecks = 0;
         let failureMessage = 'PayManager did not finish the parking search';
+        let terminalAreaManagerFailure = false;
 
         function scheduleNextAttempt() {
             handoffTimer = window.setTimeout(
@@ -1081,14 +1230,24 @@
         function applyAreaManager(handoff) {
             if (areaManagerApplied) return true;
 
-            const option = findAreaManagerOption(handoff.areaManager);
+            const match = findAreaManagerMatch(handoff.areaManager);
             const select = getSelect();
 
-            if (!option || !select) {
+            if (match.status === 'ambiguous') {
                 failureMessage =
-                    `Area Manager not found: ${handoff.areaManager}`;
+                    `Multiple PRS users match: ${handoff.areaManager}. ` +
+                    'Select the user manually.';
+                terminalAreaManagerFailure = true;
                 return false;
             }
+
+            if (match.status !== 'matched' || !select) {
+                failureMessage =
+                    `PRS user not found: ${handoff.areaManager}`;
+                return false;
+            }
+
+            const option = match.option;
 
             if (select.value === option.value) {
                 areaManagerApplied = true;
@@ -1146,20 +1305,20 @@
             setStatus(
                 isRepeat
                     ? `Confirming search for plate: ${handoff.licensePlate}`
-                    : `Searching ${pendingStatusAttempted ? 'Pending' : 'Active'} for: ${handoff.licensePlate}`
+                    : `Searching ${activeStatusAttempted ? 'Active' : 'Pending'} for: ${handoff.licensePlate}`
             );
         }
 
         function ensureRequestedParkingStatus(handoff) {
-            pendingStatusAttempted =
-                pendingStatusAttempted ||
-                wasPendingStatusAttempted(handoff);
+            activeStatusAttempted =
+                activeStatusAttempted ||
+                wasActiveStatusAttempted(handoff);
 
-            const wantsPending = pendingStatusAttempted;
-            const button = wantsPending
-                ? getPendingStatusButton()
-                : getActiveStatusButton();
-            const statusName = wantsPending ? 'Pending' : 'Active';
+            const wantsActive = activeStatusAttempted;
+            const button = wantsActive
+                ? getActiveStatusButton()
+                : getPendingStatusButton();
+            const statusName = wantsActive ? 'Active' : 'Pending';
 
             if (!button) {
                 failureMessage = `${statusName} parking status was not found`;
@@ -1181,19 +1340,19 @@
         }
 
         function finishCurrentStatusAsEmpty(handoff, input) {
-            if (!pendingStatusAttempted) {
-                markPendingStatusAttempted(handoff);
-                pendingStatusAttempted = true;
+            if (!activeStatusAttempted) {
+                markActiveStatusAttempted(handoff);
+                activeStatusAttempted = true;
                 parkingStatusClickedAt = 0;
                 parkingStatusClickRequested = false;
                 resetSearchPhase();
-                setStatus('No active entries. Switching to Pending...');
+                setStatus('No Pending entries. Switching to Active...');
                 return false;
             }
 
             clearRequestedHandoff();
             setStatus(
-                `No active or Pending entries found for: ${handoff.licensePlate}`,
+                `No Pending or Active entries found for: ${handoff.licensePlate}`,
                 '#a15c00'
             );
             (document.getElementById(PLATE_INPUT_ID) || input)?.focus();
@@ -1203,7 +1362,7 @@
         function finishMatchedResult(handoff, input) {
             clearRequestedHandoff();
             setStatus(
-                `Found in ${pendingStatusAttempted ? 'Pending' : 'Active'}: ${handoff.licensePlate}`,
+                `Found in ${activeStatusAttempted ? 'Active' : 'Pending'}: ${handoff.licensePlate}`,
                 'green'
             );
             input.focus();
@@ -1233,7 +1392,7 @@
                     lastTableEntriesText = '';
                     stableTableChecks = 0;
                     setStatus(
-                        `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                        `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                     );
                     return false;
                 }
@@ -1262,9 +1421,9 @@
 
             if (isParkingTableProcessing()) {
                 failureMessage =
-                    `${pendingStatusAttempted ? 'Pending' : 'Active'} table is still loading`;
+                    `${activeStatusAttempted ? 'Active' : 'Pending'} table is still loading`;
                 setStatus(
-                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                 );
                 return false;
             }
@@ -1280,9 +1439,9 @@
                 }
 
                 failureMessage =
-                    `${pendingStatusAttempted ? 'Pending' : 'Active'} table did not finish reloading`;
+                    `${activeStatusAttempted ? 'Active' : 'Pending'} table did not finish reloading`;
                 setStatus(
-                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                 );
                 return false;
             }
@@ -1292,7 +1451,7 @@
                 !fallbackElapsed
             ) {
                 setStatus(
-                    `Waiting for the ${pendingStatusAttempted ? 'Pending' : 'Active'} table...`
+                    `Waiting for the ${activeStatusAttempted ? 'Active' : 'Pending'} table...`
                 );
                 return false;
             }
@@ -1322,7 +1481,7 @@
                 stableResultChecks = 0;
                 lastEntriesText = '';
                 setStatus(
-                    `Waiting for ${pendingStatusAttempted ? 'Pending' : 'Active'} search results...`
+                    `Waiting for ${activeStatusAttempted ? 'Active' : 'Pending'} search results...`
                 );
                 return false;
             }
@@ -1350,18 +1509,21 @@
             const renderedMatch = hasRenderedPlateMatch(
                 handoff.licensePlate
             );
-
-            if (
+            const matchingResultObserved =
                 filterDrawObserved &&
                 renderedMatch &&
                 isEntriesSummaryText(entriesText) &&
-                !isEmptyEntriesText(entriesText) &&
+                !isEmptyEntriesText(entriesText);
+
+            if (
+                matchingResultObserved &&
                 stableResultChecks >= HANDOFF_STABLE_RESULT_CHECKS
             ) {
                 return finishMatchedResult(handoff, input);
             }
 
             if (
+                !matchingResultObserved &&
                 plateDispatchCount < HANDOFF_MAX_PLATE_DISPATCHES &&
                 now - lastPlateDispatchAt >= HANDOFF_PLATE_REAPPLY_MS
             ) {
@@ -1416,6 +1578,12 @@
 
             applyAreaManager(handoff);
 
+            if (terminalAreaManagerFailure) {
+                clearRequestedHandoff();
+                setStatus(failureMessage, 'red');
+                return;
+            }
+
             if (areaManagerApplied && !handoff.licensePlate) {
                 clearRequestedHandoff();
                 return;
@@ -1429,7 +1597,7 @@
                 ensureRequestedParkingStatus(handoff);
             const parkingStatusSettled =
                 !parkingStatusClickedAt ||
-                Date.now() - parkingStatusClickedAt >= HANDOFF_PENDING_SETTLE_MS;
+                Date.now() - parkingStatusClickedAt >= HANDOFF_STATUS_SETTLE_MS;
 
             if (parkingStatusReady && parkingStatusSettled) {
                 const input = getParkingSearchInput();

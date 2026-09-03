@@ -21,6 +21,7 @@ const scriptSource = originalSource
         getColumnsButton,
         openColumnsPanel,
         popupHasConfiguredColumns,
+        runColumnsController,
         startReplacementRecovery,
         toggleColumns,
         waitFor
@@ -213,7 +214,8 @@ scenario.api.closeColumnsPopup();
 assert.equal(scenario.popupScreen.clickCount, 1);
 
 const reopenedPopup = await scenario.api.openColumnsPanel();
-assert.equal(reopenedPopup, scenario.popup);
+assert.equal(reopenedPopup.popup, scenario.popup);
+assert.equal(reopenedPopup.openedByController, true);
 assert.equal(scenario.button.clickCount, 1);
 
 scenario.elements.delete('financial_column_toggle_btn');
@@ -260,6 +262,8 @@ const timedOutValue = await scenario.api.waitFor(() => null, 5);
 assert.equal(timedOutValue, null);
 
 const delayedScenario = createScenario();
+delayedScenario.popup.ariaHidden = 'true';
+delayedScenario.popupScreen.classList.remove('in');
 delayedScenario.api.startReplacementRecovery();
 delayedScenario.elements.set('right_container', { parentElement: null });
 delayedScenario.triggerBodyMutation();
@@ -270,5 +274,126 @@ assert.equal(
     'discovering the delayed transaction root must schedule column enforcement'
 );
 assert.equal(delayedScenario.enabledControl.classList.contains('toggled'), true);
+assert.equal(
+    delayedScenario.button.clickCount,
+    0,
+    'delayed recovery must not visibly open the columns popup'
+);
+assert.equal(
+    delayedScenario.popupScreen.clickCount,
+    0,
+    'delayed recovery must not need to close a popup it did not open'
+);
+
+const lateHiddenPopupScenario = createScenario();
+lateHiddenPopupScenario.popup.ariaHidden = 'true';
+lateHiddenPopupScenario.popupScreen.classList.remove('in');
+lateHiddenPopupScenario.elements.delete('financial_column_toggle_btn');
+lateHiddenPopupScenario.elements.delete('financial_column_toggle');
+
+setTimeout(() => {
+    lateHiddenPopupScenario.elements.set(
+        'financial_column_toggle_btn',
+        lateHiddenPopupScenario.button
+    );
+    lateHiddenPopupScenario.elements.set(
+        'financial_column_toggle',
+        lateHiddenPopupScenario.popup
+    );
+}, 5);
+
+await lateHiddenPopupScenario.api.runColumnsController();
+assert.equal(
+    lateHiddenPopupScenario.button.clickCount,
+    0,
+    'a hidden popup that appears while waiting must be reused silently'
+);
+assert.equal(lateHiddenPopupScenario.popupScreen.clickCount, 0);
+assert.equal(
+    lateHiddenPopupScenario.enabledControl.classList.contains('toggled'),
+    true
+);
+
+const lateOpenPopupScenario = createScenario();
+lateOpenPopupScenario.elements.delete('financial_column_toggle_btn');
+lateOpenPopupScenario.elements.delete('financial_column_toggle');
+
+setTimeout(() => {
+    lateOpenPopupScenario.elements.set(
+        'financial_column_toggle_btn',
+        lateOpenPopupScenario.button
+    );
+    lateOpenPopupScenario.elements.set(
+        'financial_column_toggle',
+        lateOpenPopupScenario.popup
+    );
+}, 5);
+
+await lateOpenPopupScenario.api.runColumnsController();
+assert.equal(lateOpenPopupScenario.button.clickCount, 0);
+assert.equal(
+    lateOpenPopupScenario.popupScreen.clickCount,
+    0,
+    'the controller must not close a popup that appeared already open'
+);
+
+const replacedOwnedPopupScenario = createScenario();
+replacedOwnedPopupScenario.popup.ariaHidden = 'true';
+replacedOwnedPopupScenario.popupScreen.classList.remove('in');
+replacedOwnedPopupScenario.elements.delete('financial_column_toggle');
+const replacementPopupScreen = {
+    classList: new FakeClassList('in'),
+    clickCount: 0,
+    click() {
+        this.clickCount++;
+        this.classList.remove('in');
+    }
+};
+const replacementPopup = {
+    ariaHidden: 'false',
+    querySelector(selector) {
+        if (selector.startsWith('a.')) {
+            return replacedOwnedPopupScenario.controls.get(
+                selector.slice(2)
+            ) || null;
+        }
+
+        return null;
+    },
+    getAttribute(name) {
+        return name === 'aria-hidden' ? this.ariaHidden : null;
+    }
+};
+const originalButtonClick =
+    replacedOwnedPopupScenario.button.click.bind(
+        replacedOwnedPopupScenario.button
+    );
+
+replacedOwnedPopupScenario.button.click = () => {
+    originalButtonClick();
+    replacedOwnedPopupScenario.elements.set(
+        'financial_column_toggle',
+        replacedOwnedPopupScenario.popup
+    );
+
+    setTimeout(() => {
+        replacedOwnedPopupScenario.elements.set(
+            'financial_column_toggle',
+            replacementPopup
+        );
+        replacedOwnedPopupScenario.elements.set(
+            'financial_column_toggle-screen',
+            replacementPopupScreen
+        );
+    }, 10);
+};
+
+await replacedOwnedPopupScenario.api.runColumnsController();
+assert.equal(replacedOwnedPopupScenario.button.clickCount, 1);
+assert.equal(
+    replacementPopupScreen.clickCount,
+    0,
+    'the controller must not close a replacement popup it did not open'
+);
 
 console.log('PayManager column controller tests passed.');

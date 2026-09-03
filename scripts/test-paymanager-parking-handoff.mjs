@@ -28,6 +28,9 @@ const testSource = `${source.slice(0, initIndex)}
         findPrsSearchMatches: typeof findPrsSearchMatches === 'function'
             ? findPrsSearchMatches
             : undefined,
+        findReliablePrsMatch: typeof findReliablePrsMatch === 'function'
+            ? findReliablePrsMatch
+            : undefined,
         startInitialHandoffOrRestore,
         markTableReloadExpected,
         hasTableChangedSince
@@ -55,6 +58,12 @@ function createHandoffScenario({
     pendingApplyAfterDispatches = 1,
     activeFilteredRowMode = 'match',
     pendingFilteredRowMode = 'match',
+    plateReapplyMs = null,
+    prsOptions = [
+        { value: 'manager-1', label: 'Example Manager' },
+        { value: 'manager-2', label: 'Second Manager' }
+    ],
+    prsOptionsAvailableAt = 0,
     locationHash = '#tmAreaManager=Example%20Manager&tmLicensePlate=TEST123'
 } = {}) {
     let clock = 0;
@@ -72,6 +81,7 @@ function createHandoffScenario({
     const statusClickTimes = [];
     const jqueryTriggeredEvents = [];
     const tableMutationObservers = [];
+    const eventTimeline = [];
 
     class FakeMutationObserver {
         constructor(callback) {
@@ -236,6 +246,15 @@ function createHandoffScenario({
             });
 
             if (this.isTableFilter && event.type === 'input') {
+                eventTimeline.push({
+                    type: 'plate-search',
+                    value: this.value,
+                    selectedUser: select.value,
+                    at: clock
+                });
+            }
+
+            if (this.isTableFilter && event.type === 'input') {
                 if (!this.value) {
                     entriesInfo.textContent = currentInitialText();
                     showInitialRows();
@@ -304,22 +323,25 @@ function createHandoffScenario({
             statusClickTimes.push({ status: 'pending', at: clock });
         }
     };
-    const option = {
-        value: 'manager-1',
-        textContent: 'Example Manager'
-    };
-    const secondOption = {
-        value: 'manager-2',
-        textContent: 'Second Manager'
-    };
+    const selectOptions = prsOptions.map(option => ({
+        value: String(option.value),
+        textContent: String(option.label)
+    }));
     const select = {
-        value: option.value,
-        options: [option, secondOption],
+        value: selectOptions[0]?.value || '',
+        get options() {
+            return clock >= prsOptionsAvailableAt ? selectOptions : [];
+        },
         dispatchedEvents: [],
         dispatchEvent(event) {
             this.dispatchedEvents.push(event.type);
 
-            if (event.type === 'change' && this.value === secondOption.value) {
+            if (event.type === 'change') {
+                eventTimeline.push({
+                    type: 'user-selection',
+                    value: this.value,
+                    at: clock
+                });
                 entriesInfo.textContent = '1 10 70';
                 renderedRows = [createRow('SECOND999')];
             }
@@ -427,7 +449,14 @@ function createHandoffScenario({
         }
     };
 
-    vm.runInNewContext(testSource, context);
+    const scenarioSource = plateReapplyMs === null
+        ? testSource
+        : testSource.replace(
+            /const HANDOFF_PLATE_REAPPLY_MS = \d+;/,
+            `const HANDOFF_PLATE_REAPPLY_MS = ${plateReapplyMs};`
+        );
+
+    vm.runInNewContext(scenarioSource, context);
 
     function runTimers(maximumCallbacks = 240) {
         let callbacks = 0;
@@ -463,6 +492,7 @@ function createHandoffScenario({
         getActivePlateDispatches: () => activePlateDispatches,
         getPendingPlateDispatches: () => pendingPlateDispatches,
         getDispatchedEvents: () => dispatchedEvents,
+        getEventTimeline: () => eventTimeline,
         getStatusClickTimes: () => statusClickTimes,
         getJqueryTriggeredEvents: () => jqueryTriggeredEvents,
         runScriptAgain() {
@@ -516,6 +546,11 @@ assert.equal(
     typeof searchScenario.api.findPrsSearchMatches,
     'function',
     'PRS search must expose its production matching behavior'
+);
+assert.equal(
+    typeof searchScenario.api.findReliablePrsMatch,
+    'function',
+    'URL handoffs must use the shared reliable PRS matching behavior'
 );
 
 const prsSearchOptions = [
@@ -587,54 +622,383 @@ assert.deepEqual(
     'legacy literal exact, prefix, and contains ranking must remain intact'
 );
 
-// A positive Active result must stop the flow without touching Pending.
-const activeMatch = createHandoffScenario({
-    activeApplyAfterDispatches: 2
+const reliablePrsOptions = [
+    { value: 'moskenes', label: 'Moskenes Kommune' },
+    { value: 'nesbyen', label: 'Nesbyen-Hedalen' },
+    { value: 'prs-301', label: 'Vegen Gulsvik-Damtjern SA' },
+    { value: 'prs-302', label: 'Helse Fonna AS' },
+    { value: 'prs-303', label: 'FoglefonnaUser' },
+    { value: 'prs-304', label: 'Flakstad Kommune User' }
+];
+
+for (const [query, expectedLabel] of [
+    ['MoskenesKommune', 'Moskenes Kommune'],
+    ['Moskenes Kommune', 'Moskenes Kommune'],
+    ['NesbyenHedalen', 'Nesbyen-Hedalen'],
+    ['Nesbyen Hedalen', 'Nesbyen-Hedalen'],
+    ['Nesbyen-Hedalen', 'Nesbyen-Hedalen'],
+    ['  nEsByEn---hEdAlEn  ', 'Nesbyen-Hedalen'],
+    ['VegenGulsvikDamtjern', 'Vegen Gulsvik-Damtjern SA'],
+    ['HelseFonnaHF', 'Helse Fonna AS'],
+    ['Foglefonna', 'FoglefonnaUser'],
+    ['Flakstad', 'Flakstad Kommune User']
+]) {
+    const match = searchScenario.api.findReliablePrsMatch(
+        reliablePrsOptions,
+        query
+    );
+
+    assert.equal(match.status, 'matched', `${query} must match reliably`);
+    assert.equal(match.option.label, expectedLabel);
+}
+
+for (const [query, expectedLabel] of [
+    ['VegenGulsvikDamtjern', 'Vegen Gulsvik-Damtjern SA'],
+    ['HelseFonnaHF', 'Helse Fonna AS'],
+    ['Foglefonna', 'FoglefonnaUser']
+]) {
+    assert.equal(
+        searchScenario.api.findPrsSearchMatches(
+            reliablePrsOptions,
+            query
+        )[0].label,
+        expectedLabel,
+        `${query} must also rank the suffix-aware match first in direct PRS search`
+    );
+}
+
+assert.equal(
+    searchScenario.api.findReliablePrsMatch(
+        reliablePrsOptions,
+        'UnknownManager'
+    ).status,
+    'not-found',
+    'an unknown compact name must not fall back to fuzzy matching'
+);
+
+assert.equal(
+    searchScenario.api.findReliablePrsMatch(
+        [{ value: 'HelseFonnaHF', label: 'Different Organization AS' }],
+        'HelseFonna'
+    ).status,
+    'not-found',
+    'organization-suffix fallback must not trust a mismatched internal option value'
+);
+
+for (const [query, label] of [['Andre', 'Andreas']]) {
+    assert.equal(
+        searchScenario.api.findReliablePrsMatch(
+            [{ value: 'prs-name-safety', label }],
+            query
+        ).status,
+        'not-found',
+        `${query} must not treat the ending of ${label} as an organization suffix`
+    );
+}
+
+const ambiguousPrsMatch = searchScenario.api.findReliablePrsMatch(
+    [
+        { value: 'nesbyen-1', label: 'Nesbyen-Hedalen' },
+        { value: 'nesbyen-2', label: 'Nesbyen Hedalen' }
+    ],
+    'NesbyenHedalen'
+);
+
+assert.equal(
+    ambiguousPrsMatch.status,
+    'ambiguous',
+    'multiple options with the same compact name must require manual selection'
+);
+assert.equal(ambiguousPrsMatch.option, null);
+
+const ambiguousSuffixPrsMatch = searchScenario.api.findReliablePrsMatch(
+    [
+        { value: 'prs-401', label: 'Helse Fonna AS' },
+        { value: 'prs-402', label: 'Helse Fonna HF' }
+    ],
+    'HelseFonna'
+);
+
+assert.equal(
+    ambiguousSuffixPrsMatch.status,
+    'ambiguous',
+    'multiple options with the same organization stem must require manual selection'
+);
+assert.equal(ambiguousSuffixPrsMatch.option, null);
+
+const exactSuffixPrsMatch = searchScenario.api.findReliablePrsMatch(
+    [
+        { value: 'prs-401', label: 'Helse Fonna AS' },
+        { value: 'prs-402', label: 'Helse Fonna HF' }
+    ],
+    'HelseFonnaHF'
+);
+
+assert.equal(
+    exactSuffixPrsMatch.status,
+    'matched',
+    'an exact compact match must outrank organization-stem fallback matches'
+);
+assert.equal(exactSuffixPrsMatch.option.label, 'Helse Fonna HF');
+
+function verifyUrlHandoff({
+    areaManager,
+    encodedAreaManager = encodeURIComponent(areaManager),
+    licensePlate,
+    encodedLicensePlate = encodeURIComponent(licensePlate),
+    expectedLabel,
+    expectedValue,
+    optionsAvailableAt = 0
+}) {
+    const scenario = createHandoffScenario({
+        prsOptions: [
+            { value: 'unrelated', label: 'Unrelated Manager' },
+            { value: expectedValue, label: expectedLabel }
+        ],
+        prsOptionsAvailableAt: optionsAvailableAt,
+        locationHash:
+            `#tmAreaManager=${encodedAreaManager}` +
+            `&tmLicensePlate=${encodedLicensePlate}`
+    });
+
+    assert.equal(scenario.api.applyRequestedHandoff(), true);
+    assert.equal(
+        scenario.api.applyRequestedHandoff(),
+        true,
+        'repeated initialization must reuse the active handoff run'
+    );
+    scenario.runTimers();
+
+    assert.equal(scenario.select.value, expectedValue);
+    assert.equal(scenario.input.value, licensePlate.replace(/[\s-]+/g, ''));
+    assert.equal(scenario.plateEditor.value, licensePlate.replace(/[\s-]+/g, ''));
+    assert.equal(scenario.getPendingPlateDispatches(), 1);
+    assert.equal(scenario.getActivePlateDispatches(), 0);
+    assert.equal(
+        scenario.status.textContent,
+        `Found in Pending: ${licensePlate.replace(/[\s-]+/g, '')}`
+    );
+
+    const selectionIndex = scenario.getEventTimeline().findIndex(
+        event => event.type === 'user-selection'
+    );
+    const searchIndex = scenario.getEventTimeline().findIndex(
+        event => event.type === 'plate-search'
+    );
+
+    assert.ok(selectionIndex >= 0, 'the requested PRS user was not selected');
+    assert.ok(searchIndex > selectionIndex, 'plate search started before PRS selection');
+    assert.equal(
+        scenario.getEventTimeline()[searchIndex].selectedUser,
+        expectedValue,
+        'plate search used the wrong PRS user'
+    );
+
+    return scenario;
+}
+
+const nesbyenHandoff = verifyUrlHandoff({
+    areaManager: 'NesbyenHedalen',
+    licensePlate: 'EF78880',
+    expectedLabel: 'Nesbyen-Hedalen',
+    expectedValue: 'nesbyen',
+    optionsAvailableAt: 1500
+});
+assert.ok(
+    nesbyenHandoff.getClock() >= 1500,
+    'handoff must wait for delayed PRS options'
+);
+
+verifyUrlHandoff({
+    areaManager: 'MoskenesKommune',
+    licensePlate: 'HRC5I5',
+    expectedLabel: 'Moskenes Kommune',
+    expectedValue: 'moskenes'
 });
 
-assert.equal(activeMatch.runScriptAgain(), true);
+verifyUrlHandoff({
+    areaManager: 'Nesbyen Hedalen',
+    encodedAreaManager: '%20%20nEsByEn---hEdAlEn%20%20',
+    licensePlate: 'EF78880',
+    encodedLicensePlate: 'EF%2078-880',
+    expectedLabel: 'Nesbyen-Hedalen',
+    expectedValue: 'nesbyen'
+});
 
-assert.equal(activeMatch.api.applyRequestedHandoff(), true);
-activeMatch.runTimers();
+verifyUrlHandoff({
+    areaManager: 'VegenGulsvikDamtjern',
+    licensePlate: 'TEST301',
+    expectedLabel: 'Vegen Gulsvik-Damtjern SA',
+    expectedValue: 'prs-301'
+});
 
-assert.equal(activeMatch.input.value, 'TEST123');
-assert.equal(activeMatch.plateEditor.value, 'TEST123');
-assert.equal(activeMatch.input.focused, true);
-assert.equal(activeMatch.getActiveClicks(), 0);
-assert.equal(activeMatch.getPendingClicks(), 0);
-assert.equal(activeMatch.getActivePlateDispatches(), 2);
-assert.deepEqual(activeMatch.select.dispatchedEvents, []);
-assert.equal(activeMatch.getCleanUrl(), '/parking');
-assert.equal(activeMatch.status.textContent, 'Found in Active: TEST123');
+verifyUrlHandoff({
+    areaManager: 'HelseFonnaHF',
+    licensePlate: 'TEST302',
+    expectedLabel: 'Helse Fonna AS',
+    expectedValue: 'prs-302'
+});
 
-// A stable zero Active result waits five seconds, then searches Pending.
+verifyUrlHandoff({
+    areaManager: 'Foglefonna',
+    licensePlate: 'TEST123',
+    expectedLabel: 'FoglefonnaUser',
+    expectedValue: 'prs-303'
+});
+
+const missingAreaManager = createHandoffScenario({
+    locationHash: '#tmLicensePlate=EF78880'
+});
+assert.equal(missingAreaManager.api.applyRequestedHandoff(), false);
+assert.equal(
+    missingAreaManager.status.textContent,
+    'PayManager handoff is missing the Area Manager.'
+);
+assert.equal(missingAreaManager.getActivePlateDispatches(), 0);
+
+const missingLicensePlate = createHandoffScenario({
+    locationHash: '#tmAreaManager=NesbyenHedalen'
+});
+assert.equal(missingLicensePlate.api.applyRequestedHandoff(), false);
+assert.equal(
+    missingLicensePlate.status.textContent,
+    'PayManager handoff is missing the license plate.'
+);
+assert.equal(missingLicensePlate.getActivePlateDispatches(), 0);
+
+const invalidLicensePlate = createHandoffScenario({
+    locationHash: '#tmAreaManager=NesbyenHedalen&tmLicensePlate=%25%25%25'
+});
+assert.equal(invalidLicensePlate.api.applyRequestedHandoff(), false);
+assert.equal(
+    invalidLicensePlate.status.textContent,
+    'PayManager handoff has an invalid license plate.'
+);
+assert.equal(invalidLicensePlate.getActivePlateDispatches(), 0);
+
+const missingPrsUser = createHandoffScenario({
+    locationHash: '#tmAreaManager=UnknownManager&tmLicensePlate=EF78880'
+});
+assert.equal(missingPrsUser.api.applyRequestedHandoff(), true);
+missingPrsUser.runTimers();
+assert.equal(
+    missingPrsUser.status.textContent,
+    'PRS user not found: UnknownManager'
+);
+assert.equal(missingPrsUser.getActivePlateDispatches(), 0);
+
+const ambiguousHandoff = createHandoffScenario({
+    prsOptions: [
+        { value: 'nesbyen-1', label: 'Nesbyen-Hedalen' },
+        { value: 'nesbyen-2', label: 'Nesbyen Hedalen' }
+    ],
+    locationHash: '#tmAreaManager=NesbyenHedalen&tmLicensePlate=EF78880'
+});
+assert.equal(ambiguousHandoff.api.applyRequestedHandoff(), true);
+ambiguousHandoff.runTimers();
+assert.equal(
+    ambiguousHandoff.status.textContent,
+    'Multiple PRS users match: NesbyenHedalen. Select the user manually.'
+);
+assert.equal(ambiguousHandoff.getActivePlateDispatches(), 0);
+
+// A positive Pending result must stop without checking Active, even when
+// the plate reapply interval matches the handoff retry interval.
 const pendingMatch = createHandoffScenario({
-    activeFilteredText: '0 0 69'
+    pendingApplyAfterDispatches: 2,
+    plateReapplyMs: 500
 });
+
+assert.equal(pendingMatch.runScriptAgain(), true);
 
 assert.equal(pendingMatch.api.applyRequestedHandoff(), true);
 pendingMatch.runTimers();
 
+assert.equal(pendingMatch.input.value, 'TEST123');
+assert.equal(pendingMatch.plateEditor.value, 'TEST123');
+assert.equal(pendingMatch.input.focused, true);
 assert.equal(pendingMatch.getActiveClicks(), 0);
 assert.equal(pendingMatch.getPendingClicks(), 1);
-assert.ok(pendingMatch.getActivePlateDispatches() >= 1);
-assert.ok(pendingMatch.getPendingPlateDispatches() >= 1);
-assert.equal(pendingMatch.input.value, 'TEST123');
+assert.equal(pendingMatch.getPendingPlateDispatches(), 2);
+assert.equal(pendingMatch.getActivePlateDispatches(), 0);
+assert.deepEqual(pendingMatch.select.dispatchedEvents, []);
+assert.equal(pendingMatch.getCleanUrl(), '/parking');
 assert.equal(pendingMatch.status.textContent, 'Found in Pending: TEST123');
 
-// If PayManager opens on Pending, the script still reviews Active first.
-const pendingFirst = createHandoffScenario({
+// A stable zero Pending result waits three seconds, then searches Active.
+const activeFallbackMatch = createHandoffScenario({
+    pendingFilteredText: '0 0 38'
+});
+
+assert.equal(activeFallbackMatch.api.applyRequestedHandoff(), true);
+activeFallbackMatch.runTimers();
+
+assert.equal(activeFallbackMatch.getPendingClicks(), 1);
+assert.equal(activeFallbackMatch.getActiveClicks(), 1);
+assert.ok(activeFallbackMatch.getPendingPlateDispatches() >= 1);
+assert.ok(activeFallbackMatch.getActivePlateDispatches() >= 1);
+assert.equal(activeFallbackMatch.input.value, 'TEST123');
+assert.equal(activeFallbackMatch.status.textContent, 'Found in Active: TEST123');
+
+// If PayManager opens on Pending, the script searches it without switching.
+const alreadyPending = createHandoffScenario({
     initialStatus: 'pending'
 });
 
-assert.equal(pendingFirst.api.applyRequestedHandoff(), true);
-pendingFirst.runTimers();
+assert.equal(alreadyPending.api.applyRequestedHandoff(), true);
+alreadyPending.runTimers();
 
-assert.equal(pendingFirst.getActiveClicks(), 1);
-assert.equal(pendingFirst.getPendingClicks(), 0);
-assert.equal(pendingFirst.status.textContent, 'Found in Active: TEST123');
+assert.equal(alreadyPending.getActiveClicks(), 0);
+assert.equal(alreadyPending.getPendingClicks(), 0);
+assert.equal(alreadyPending.getPendingPlateDispatches(), 1);
+assert.equal(alreadyPending.status.textContent, 'Found in Pending: TEST123');
 
-// A table with no rows uses the five-second readiness fallback before Pending.
+// A reload during the Active fallback resumes Active without rechecking Pending.
+const resumedActiveFallback = createHandoffScenario({
+    initialStatus: 'pending'
+});
+resumedActiveFallback.setSessionValue(
+    'pm_parking_handoff_active_v1',
+    '["Example Manager","TEST123"]'
+);
+
+assert.equal(resumedActiveFallback.api.applyRequestedHandoff(), true);
+resumedActiveFallback.runTimers();
+
+assert.equal(resumedActiveFallback.getPendingClicks(), 0);
+assert.equal(resumedActiveFallback.getActiveClicks(), 1);
+assert.equal(resumedActiveFallback.getPendingPlateDispatches(), 0);
+assert.equal(resumedActiveFallback.getActivePlateDispatches(), 1);
+assert.equal(
+    resumedActiveFallback.status.textContent,
+    'Found in Active: TEST123'
+);
+
+// A legacy Active-first phase marker cannot make the new version skip Pending.
+const ignoredLegacyPendingPhase = createHandoffScenario();
+ignoredLegacyPendingPhase.setSessionValue(
+    'pm_parking_handoff_pending_v1',
+    '["Example Manager","TEST123"]'
+);
+
+assert.equal(ignoredLegacyPendingPhase.api.applyRequestedHandoff(), true);
+ignoredLegacyPendingPhase.runTimers();
+
+assert.equal(ignoredLegacyPendingPhase.getPendingClicks(), 1);
+assert.equal(ignoredLegacyPendingPhase.getActiveClicks(), 0);
+assert.equal(ignoredLegacyPendingPhase.getPendingPlateDispatches(), 1);
+assert.equal(
+    ignoredLegacyPendingPhase.status.textContent,
+    'Found in Pending: TEST123'
+);
+assert.equal(
+    ignoredLegacyPendingPhase.hasSessionValue(
+        'pm_parking_handoff_pending_v1'
+    ),
+    false
+);
+
+// Empty Pending and Active tables use the three-second readiness fallback.
 const emptyBoth = createHandoffScenario({
     activeInitialText: '0 0 0',
     activeFilteredText: '0 0 0',
@@ -645,44 +1009,61 @@ const emptyBoth = createHandoffScenario({
 assert.equal(emptyBoth.api.applyRequestedHandoff(), true);
 emptyBoth.runTimers();
 
+const activeClick = emptyBoth.getStatusClickTimes().find(
+    event => event.status === 'active'
+);
 const pendingClick = emptyBoth.getStatusClickTimes().find(
     event => event.status === 'pending'
 );
 
-assert.ok(pendingClick, 'Expected the Pending status fallback');
-assert.ok(pendingClick.at >= 5000, 'Pending was selected before the table fallback');
+assert.ok(pendingClick, 'Expected Pending to be selected first');
+assert.ok(activeClick, 'Expected the Active status fallback');
+assert.ok(
+    activeClick.at - pendingClick.at >= 3000,
+    'Active was selected before the Pending table fallback'
+);
+assert.ok(
+    activeClick.at - pendingClick.at < 6000,
+    'Active did not use the bounded Pending table fallback'
+);
 assert.equal(emptyBoth.getActivePlateDispatches(), 0);
 assert.equal(emptyBoth.getPendingPlateDispatches(), 0);
 assert.equal(
     emptyBoth.status.textContent,
-    'No active or Pending entries found for: TEST123'
+    'No Pending or Active entries found for: TEST123'
 );
 
 // An ignored filter must not turn an unchanged unfiltered table into a match.
 const ignoredFilter = createHandoffScenario({
-    activeFilteredText: '1 10 69',
-    activeFilteredRowMode: 'mismatch'
+    initialStatus: 'pending',
+    pendingFilteredText: '1 10 38',
+    pendingFilteredRowMode: 'mismatch'
 });
 
 assert.equal(ignoredFilter.api.applyRequestedHandoff(), true);
 ignoredFilter.runTimers();
 
-assert.equal(ignoredFilter.getPendingClicks(), 0);
+assert.equal(ignoredFilter.getActiveClicks(), 0);
 assert.equal(
     ignoredFilter.status.textContent,
     'PayManager did not apply the plate filter for: TEST123'
 );
+assert.ok(
+    ignoredFilter.getClock() < 6000,
+    'Ignored plate filters must stop within the faster result timeout'
+);
 
 // A positive summary is not a match unless a rendered row contains the plate.
 const mismatchedRows = createHandoffScenario({
-    activeFilteredText: '1 1 69',
-    activeFilteredRowMode: 'mismatch'
+    initialStatus: 'pending',
+    pendingFilteredText: '1 1 38',
+    pendingFilteredRowMode: 'mismatch'
 });
 
 assert.equal(mismatchedRows.api.applyRequestedHandoff(), true);
 mismatchedRows.runTimers();
 
-assert.equal(mismatchedRows.getPendingClicks(), 0);
+assert.equal(mismatchedRows.getActiveClicks(), 0);
 assert.equal(
     mismatchedRows.status.textContent,
     'PayManager returned rows, but none matched: TEST123'
@@ -709,7 +1090,7 @@ assert.equal(identicalRedraw.api.hasTableChangedSince(tableAction), false);
 identicalRedraw.triggerTableMutation();
 assert.equal(identicalRedraw.api.hasTableChangedSince(tableAction), true);
 
-// Expired handoffs also remove the pending-status signature containing the plate.
+// Expired handoffs remove both current and legacy status-phase signatures.
 const expiredHandoff = createHandoffScenario({ locationHash: '' });
 expiredHandoff.setSessionValue(
     'pm_parking_handoff_v1',
@@ -720,11 +1101,19 @@ expiredHandoff.setSessionValue(
     })
 );
 expiredHandoff.setSessionValue(
+    'pm_parking_handoff_active_v1',
+    '["Expired Manager","OLD123"]'
+);
+expiredHandoff.setSessionValue(
     'pm_parking_handoff_pending_v1',
     '["Expired Manager","OLD123"]'
 );
 expiredHandoff.api.getEffectiveHandoff();
 assert.equal(expiredHandoff.hasSessionValue('pm_parking_handoff_v1'), false);
+assert.equal(
+    expiredHandoff.hasSessionValue('pm_parking_handoff_active_v1'),
+    false
+);
 assert.equal(
     expiredHandoff.hasSessionValue('pm_parking_handoff_pending_v1'),
     false
@@ -764,6 +1153,10 @@ normalReview.setSessionValue(
     })
 );
 normalReview.setSessionValue(
+    'pm_parking_handoff_active_v1',
+    '["","OLD123"]'
+);
+normalReview.setSessionValue(
     'pm_parking_handoff_pending_v1',
     '["","OLD123"]'
 );
@@ -785,6 +1178,10 @@ assert.equal(normalReview.input.value, '');
 assert.equal(normalReview.plateEditor.value, '');
 assert.equal(normalReview.getActivePlateDispatches(), 0);
 assert.equal(normalReview.hasSessionValue('pm_parking_handoff_v1'), false);
+assert.equal(
+    normalReview.hasSessionValue('pm_parking_handoff_active_v1'),
+    false
+);
 assert.equal(
     normalReview.hasSessionValue('pm_parking_handoff_pending_v1'),
     false
@@ -810,7 +1207,7 @@ dynamicPlate.plateEditor.value = ' xy-123 ';
 dynamicPlate.plateEditor.emit('input');
 dynamicPlate.runTimers();
 assert.equal(dynamicPlate.input.value, 'XY123');
-assert.equal(dynamicPlate.status.textContent, 'Found in Active: XY123');
+assert.equal(dynamicPlate.status.textContent, 'Found in Pending: XY123');
 assert.equal(
     dynamicPlate.getDispatchedEvents().every(event => event.type === 'input'),
     true,
@@ -867,23 +1264,23 @@ assert.equal(
 );
 
 // Changing the editable plate starts the same guarded search again.
-assert.equal(activeMatch.api.restartParkingSearch(' alt-456 '), true);
-activeMatch.runTimers();
+assert.equal(pendingMatch.api.restartParkingSearch(' alt-456 '), true);
+pendingMatch.runTimers();
 
-assert.equal(activeMatch.input.value, 'ALT456');
-assert.equal(activeMatch.plateEditor.value, 'ALT456');
-assert.equal(activeMatch.status.textContent, 'Found in Active: ALT456');
+assert.equal(pendingMatch.input.value, 'ALT456');
+assert.equal(pendingMatch.plateEditor.value, 'ALT456');
+assert.equal(pendingMatch.status.textContent, 'Found in Pending: ALT456');
 
 assert.equal(
-    activeMatch.api.isEmptyEntriesText('Showing 0 to 0 of 0 entries'),
+    pendingMatch.api.isEmptyEntriesText('Showing 0 to 0 of 0 entries'),
     true
 );
-assert.equal(activeMatch.api.isEmptyEntriesText('0 0'), true);
-assert.equal(activeMatch.api.isEmptyEntriesText('0 0 (38)'), true);
+assert.equal(pendingMatch.api.isEmptyEntriesText('0 0'), true);
+assert.equal(pendingMatch.api.isEmptyEntriesText('0 0 (38)'), true);
 assert.equal(
-    activeMatch.api.isEntriesSummaryText('Showing 1 to 3 of 3 entries'),
+    pendingMatch.api.isEntriesSummaryText('Showing 1 to 3 of 3 entries'),
     true
 );
-assert.equal(activeMatch.api.isEntriesSummaryText('1 1 69'), true);
+assert.equal(pendingMatch.api.isEntriesSummaryText('1 1 69'), true);
 
 console.log('PayManager parking handoff tests passed.');
