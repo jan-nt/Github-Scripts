@@ -1,21 +1,16 @@
 // ==UserScript==
 // @name         General Background Session Keeper
 // @namespace    https://nidushan.com
-// @version      3.3.0
-// @description  Opens the DIBS and Horizon tabs, keeps their sessions active, and logs back in automatically
+// @version      3.2.1
+// @description  Keeps DIBS and Riverty sessions active and resumes login when their login pages appear
 // @author       Jan Sinnadurai
 // @homepageURL  https://nidushan.com
 // @supportURL   mailto:jas@nortronic.com
 // @match        https://portal.dibspayment.eu/*
 // @match        https://horizon.gothiagroup.com/HorizonWeb/*
-// @match        https://nidushan.com/*
 // @updateURL    https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/General%20Background%20Auto%20Refresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/jan-nt/Github-Scripts/main/General%20Background%20Auto%20Refresh.user.js
-// @grant        GM_openInTab
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_deleteValue
-// @grant        GM_registerMenuCommand
+// @grant        none
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -60,310 +55,11 @@
         }
     ];
 
-    const LAUNCHER_HOST = 'nidushan.com';
-
-    const TARGET_URLS = [
-        'https://portal.dibspayment.eu/',
-        'https://horizon.gothiagroup.com/HorizonWeb/'
-    ];
-
-    const HEARTBEAT_KEY_PREFIX = 'gsk_heartbeat_';
-    const OPEN_CLAIM_KEY_PREFIX = 'gsk_opening_';
-    const CREDS_KEY_PREFIX = 'gsk_creds_';
-    const LAUNCHER_THROTTLE_KEY = 'gsk_launcher_last_open';
-    const HEARTBEAT_STALE_MS = 15 * 60 * 1000;
-    const OPEN_CLAIM_MS = 60 * 1000;
-    const OPEN_THROTTLE_MS = 10 * 60 * 1000;
-    const PARTNER_CLAIM_JITTER_MS = 4000;
-
-    function hostFromUrl(url) {
-        try {
-            return new URL(url).hostname;
-        } catch {
-            return null;
-        }
-    }
-
-    function keyForHost(prefix, host) {
-        return prefix + String(host).replace(/\./g, '_');
-    }
-
-    function isTargetHost(host) {
-        return TARGET_URLS.some(function (url) {
-            return hostFromUrl(url) === host;
-        });
-    }
-
-    function partnerInfo() {
-        return TARGET_URLS
-            .map(function (url) {
-                return {
-                    host: hostFromUrl(url),
-                    url: url
-                };
-            })
-            .filter(function (info) {
-                return info.host && info.host !== location.hostname;
-            })[0] || null;
-    }
-
-    function writeHeartbeat() {
-        if (!isTargetHost(location.hostname)) return;
-
-        try {
-            GM_setValue(
-                keyForHost(HEARTBEAT_KEY_PREFIX, location.hostname),
-                Date.now()
-            );
-        } catch {
-            // Storage unavailable; the refresh loop still works on this tab.
-        }
-    }
-
-    function openTabInBackground(url) {
-        try {
-            GM_openInTab(url, {
-                active: false,
-                insert: true,
-                setParent: true
-            });
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    function claimAndOpen(url) {
-        const host = hostFromUrl(url);
-
-        if (!host) return false;
-
-        const claimKey = keyForHost(OPEN_CLAIM_KEY_PREFIX, host);
-        const now = Date.now();
-
-        try {
-            const claimUntil = Number(GM_getValue(claimKey, 0));
-
-            if (Number.isFinite(claimUntil) && claimUntil > now) {
-                return false;
-            }
-
-            GM_setValue(claimKey, now + OPEN_CLAIM_MS);
-        } catch {
-            return openTabInBackground(url);
-        }
-
-        const opened = openTabInBackground(url);
-
-        if (!opened) {
-            try {
-                GM_setValue(claimKey, 0);
-            } catch {
-                // Ignore cleanup failures.
-            }
-        }
-
-        return opened;
-    }
-
-    function partnerHeartbeatIsStale() {
-        if (!document.hidden) return false;
-
-        const partner = partnerInfo();
-
-        if (!partner) return false;
-
-        try {
-            const lastHeartbeat = Number(
-                GM_getValue(
-                    keyForHost(HEARTBEAT_KEY_PREFIX, partner.host),
-                    0
-                )
-            );
-
-            return !(
-                Number.isFinite(lastHeartbeat) &&
-                lastHeartbeat > Date.now() - HEARTBEAT_STALE_MS
-            );
-        } catch {
-            return false;
-        }
-    }
-
-    function maybeReopenPartner() {
-        if (!partnerHeartbeatIsStale()) return;
-
-        const partner = partnerInfo();
-
-        if (!partner) return;
-
-        if (!claimAndOpen(partner.url)) {
-            // Another tab may have claimed the open. Try again shortly in
-            // case that tab failed to actually open anything.
-            window.setTimeout(function () {
-                if (partnerHeartbeatIsStale()) {
-                    claimAndOpen(partner.url);
-                }
-            }, PARTNER_CLAIM_JITTER_MS);
-        }
-    }
-
-    function openBothTargetsFromLauncher() {
-        try {
-            const lastOpen = Number(GM_getValue(LAUNCHER_THROTTLE_KEY, 0));
-
-            if (
-                Number.isFinite(lastOpen) &&
-                lastOpen > Date.now() - OPEN_THROTTLE_MS
-            ) {
-                return;
-            }
-
-            GM_setValue(LAUNCHER_THROTTLE_KEY, Date.now());
-        } catch {
-            // Proceed even if storage is unavailable.
-        }
-
-        TARGET_URLS.forEach(function (url, index) {
-            window.setTimeout(function () {
-                claimAndOpen(url);
-            }, index * 250);
-        });
-    }
-
-    function credsKey() {
-        return keyForHost(CREDS_KEY_PREFIX, location.hostname);
-    }
-
-    function getStoredCredentials() {
-        try {
-            const raw = GM_getValue(credsKey(), '');
-
-            if (typeof raw === 'string' && raw.length > 0) {
-                const parsed = JSON.parse(raw);
-
-                if (parsed && typeof parsed.username === 'string') {
-                    return parsed;
-                }
-            }
-        } catch {
-            // No usable stored credentials.
-        }
-
-        return null;
-    }
-
-    function saveStoredCredentials(credentials) {
-        try {
-            GM_setValue(credsKey(), JSON.stringify(credentials));
-        } catch {
-            // Storage unavailable.
-        }
-    }
-
-    function clearStoredCredentials() {
-        try {
-            GM_deleteValue(credsKey());
-        } catch {
-            // Nothing stored.
-        }
-    }
-
-    function findLoginControls() {
-        const form = document.querySelector('form');
-
-        if (!form) {
-            return { username: null, password: null, button: null };
-        }
-
-        const username = form.querySelector(
-            'input[type="text"], input[type="email"], ' +
-            'input[name*="user" i], input[id*="user" i], ' +
-            'input[name*="name" i], input[id*="name" i]'
-        );
-        const password = form.querySelector('input[type="password"]');
-        const button = form.querySelector(
-            'button[type="submit"], input[type="submit"], button:not([type])'
-        );
-
-        return { username: username, password: password, button: button };
-    }
-
-    function setNativeValue(element, value) {
-        const descriptor = Object.getOwnPropertyDescriptor(element, 'value');
-
-        if (descriptor && descriptor.set) {
-            descriptor.set.call(element, value);
-        } else {
-            element.value = value;
-        }
-
-        element.dispatchEvent(new Event('input', { bubbles: true }));
-        element.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-
-    function fillCredentials(credentials) {
-        const controls = findLoginControls();
-
-        if (!controls.username || !controls.password) return false;
-
-        credentialsFilled = true;
-
-        setNativeValue(controls.username, credentials.username);
-        setNativeValue(controls.password, credentials.password);
-
-        if (controls.button) {
-            try {
-                controls.button.click();
-            } catch {
-                // Form submission continues below if the click fails.
-            }
-        }
-
-        return true;
-    }
-
-    function registerMenuCommands() {
-        if (!isTargetHost(location.hostname)) return;
-
-        const siteLabel = location.hostname;
-
-        GM_registerMenuCommand(
-            'Save login credentials for ' + siteLabel,
-            function () {
-                const username = window.prompt('Username for ' + siteLabel + ':');
-
-                if (username === null) return;
-
-                const password = window.prompt(
-                    'Password for ' + siteLabel + ' (' + username + '):'
-                );
-
-                if (password === null) return;
-
-                saveStoredCredentials({
-                    username: username.trim(),
-                    password: password
-                });
-            }
-        );
-
-        GM_registerMenuCommand(
-            'Clear saved login credentials for ' + siteLabel,
-            function () {
-                if (window.confirm('Remove saved login credentials for ' + siteLabel + '?')) {
-                    clearStoredCredentials();
-                }
-            }
-        );
-    }
-
     let refreshTimer = null;
     let loginTimer = null;
     let loginAttempted = false;
     let loginRefreshReset = false;
     let memoryNextRefreshTime = null;
-    let credentialsFilled = false;
 
     function getLoginPage() {
         return LOGIN_PAGES.find(page =>
@@ -511,22 +207,6 @@
 
             if (currentPage !== page) return;
 
-            // If stored credentials exist, fill the form and submit as soon
-            // as the controls are found instead of waiting for autofill.
-            if (!credentialsFilled) {
-                const credentials = getStoredCredentials();
-
-                if (credentials) {
-                    const filled = fillCredentials(credentials);
-
-                    if (filled) {
-                        loginAttempted = true;
-                        scheduleLoginRecoveryReload();
-                        return;
-                    }
-                }
-            }
-
             const button = findLoginButton(page);
 
             if (button) {
@@ -557,7 +237,6 @@
         clearLoginTimer();
         loginAttempted = false;
         loginRefreshReset = false;
-        credentialsFilled = false;
     }
 
     function resumeRefreshAfterLogin() {
@@ -617,11 +296,6 @@
     }
 
     function checkRefresh() {
-        if (isTargetHost(location.hostname)) {
-            writeHeartbeat();
-            maybeReopenPartner();
-        }
-
         const loginPage = getLoginPage();
 
         if (loginPage) {
@@ -674,15 +348,6 @@
     function wakeSessionKeeper() {
         scheduleCheck(0);
     }
-
-    // If this is the launcher page, just open both target tabs and stop.
-    // Nothing on the launcher needs session keeping or refreshing.
-    if (location.hostname === LAUNCHER_HOST) {
-        openBothTargetsFromLauncher();
-        return;
-    }
-
-    registerMenuCommands();
 
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) wakeSessionKeeper();
